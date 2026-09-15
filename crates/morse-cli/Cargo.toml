@@ -1,0 +1,26 @@
+[package]
+name = "morse-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Morse: a cloud computer harness — streaming agent + side agent"
+
+[[bin]]
+name = "morse"
+path = "src/main.rs"
+
+[dependencies]
+morse-core = { path = "../morse-core" }
+morse-server = { path = "../morse-server" }
+tokio = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+futures-util = { workspace = true }
+tokio-tungstenite = { workspace = true }
+ratatui = { workspace = true }
+crossterm = { workspace = true }
+clap = { workspace = true }
+chrono = { workspace = true }
+reqwest = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

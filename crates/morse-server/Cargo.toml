@@ -1,0 +1,25 @@
+[package]
+name = "morse-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Morse cloud computer server: streaming sessions over WebSocket"
+
+[dependencies]
+morse-core = { path = "../morse-core" }
+tokio = { workspace = true }
+axum = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+futures-util = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[[bin]]
+name = "morse-server"
+path = "src/main.rs"
+
+[dev-dependencies]
+tokio-tungstenite.workspace = true
+reqwest.workspace = true
