@@ -1,10 +1,27 @@
 # Morse
 
-A Rust agent harness for a computer you run locally or on a server. Send a task, watch shell output and file changes arrive over WebSocket, and ask a separate side agent what's happening while the main agent works.
+**Give an agent a task. Watch it work. Ask another agent for updates.**
 
-## See it in action
+Morse runs commands and edits files on your computer or server. One terminal pane shows the work. A second pane answers questions about what is done and what is still running.
 
-Send a task to the main agent, then ask the side agent for an update while it runs:
+Built in Rust. Includes a demo that works without an API key.
+
+## A real use case
+
+You are running tests on a remote development server. You want to watch the output and check progress without stopping the tests.
+
+```text
+run cargo test
+/ask what is running?
+```
+
+Morse runs the tests on that server. The side agent reports the active command and task status. You can close the client and reconnect later while the server keeps running.
+
+Connect with `--workspace /path/to/project` to use an existing project on the server. Commands have a default two-minute timeout.
+
+## What you see
+
+Try this demo task, then ask the question during the pause:
 
 ```text
 run echo started && sleep 10 && echo finished then create file notes.txt: built with Morse
@@ -32,101 +49,65 @@ After the pause, `finished` appears, `notes.txt` is created, and both tasks are 
 
 ## How it works
 
-1. **Connect:** the client opens a session on the server, with its own workspace.
-2. **Request:** the main agent selects tools to run commands and change files.
-3. **Watch:** the server sends output, file diffs, and task updates as events.
-4. **Ask alongside:** a separate worker answers side questions using current state and recent activity.
-5. **Return later:** reconnect to the same running server to replay recent events.
+1. **You send a task** from your terminal.
+2. **The main agent does the work** using commands and file tools.
+3. **Output appears as it happens**, including file changes and task updates.
+4. **The side agent answers questions** from the current task status and recent activity. It does not change files or pause the work.
 
-Without a key, a deterministic demo parser selects tools. With an Anthropic key, a model selects tools and answers side questions. Execution always happens on the server computer.
+All commands run on the computer hosting the Morse server.
 
-## Use cases
+## Try it
 
-| Use case | Main task | Side question |
-|---|---|---|
-| Remote build | `run cargo build` in an existing Rust workspace | `/ask what is running?` |
-| Test run | `run cargo test` | `/ask did the command finish?` |
-| File workflow | `create file notes.txt: first draft then read file notes.txt` | `/ask what's complete?` |
-| Model-assisted coding¹ | “Add a health endpoint and run the tests.” | `/ask which files changed?` |
+Requires Rust, Cargo, and Bash on macOS or Linux.
 
-¹ Requires a configured model. The demo side agent gives a fixed status summary; the live side agent can address the specific question. Use `--workspace` to select an existing project on the server.
-
-**Read the guide:** [How Morse works, use cases, and a full walkthrough](docs/how-it-works.md).
-
-## Start in two terminals
-
-Requires Rust/Cargo and Bash on macOS or Linux.
+**Terminal 1 — start the server:**
 
 ```sh
 cargo build --workspace --locked
 ./target/debug/morse serve
 ```
 
-In another terminal:
+**Terminal 2 — open the client:**
 
 ```sh
 ./target/debug/morse connect
 ```
 
-Try these in the client:
+Paste the demo task above. Files are created in `~/.morse/sessions/<id>/ws` on the server.
 
-```text
-run echo hello && sleep 3 && echo finished then create file notes.txt: built with Morse
-/ask what's done and what's running?
-```
+## Demo or real AI?
 
-The left pane shows work; the right pane shows side-agent answers. No API key is needed for this deterministic demo. Demo mode understands `run <shell command>`, `create file <path>: <content>`, `write file`, `read file`, and `list files`. Separate steps with lowercase ` then ` or `;`; use `&&` inside shell commands. Unsupported requests print a demo message.
-
-**Demo commands execute real shell commands and write real files.** The default workspace is a new directory under `~/.morse/sessions/<id>/ws`.
-
-## Use a real model
-
-Set `ANTHROPIC_API_KEY` (or `MORSE_API_KEY`) in the **server's environment**, then restart the server. `MORSE_MODEL` selects the Anthropic model; the current code defaults to `claude-sonnet-4-5`. The client needs no model credentials.
-
-The main agent can run Bash, read/write/edit files, list files, and update a task plan. The side agent receives recent activity and session state, with no tools. Shell output streams live; model prose arrives once each model response completes.
-
-Live API execution has not been validated with a paid model key. Automated tests use the demo provider.
-
-## Commands
-
-| Action | Command |
+| Mode | What you can do |
 |---|---|
-| Plain terminal client | `morse connect --plain` |
-| List server sessions | `morse sessions` |
-| Reattach and replay recent events | `morse connect --session <id>` |
-| Choose a server-side workspace | `morse connect --workspace /absolute/path` |
-| Ask the side agent | `/ask <question>` |
-| Cancel current work | `/interrupt` |
-| Disconnect | `/quit` or `/q` |
+| Demo: no key needed | Use `run`, `create file`, `write file`, `read file`, and `list files`. Side questions return a status summary. |
+| AI: Anthropic key needed | Ask for work in plain language, such as “add a health endpoint and run the tests.” The model chooses tools and answers side questions. |
 
-In the TUI, Tab selects the pane to scroll, PageUp/PageDown scroll it, and Ctrl+C exits. Disconnecting leaves server work running. Reconnecting replays the retained events.
+For AI mode, set `ANTHROPIC_API_KEY` or `MORSE_API_KEY` in the server environment and restart it. Use `MORSE_MODEL` to choose a model. Live model calls have not yet been tested with a paid API key.
 
-## Run on a remote computer
+Demo mode still runs real commands and writes real files. Separate demo steps with ` then `; use `&&` inside a shell command.
 
-Run `morse serve` on your server, then forward its loopback port:
+## Useful commands
 
-```sh
-ssh -N -L 7800:127.0.0.1:7800 user@your-server
-```
+| Do this | Command |
+|---|---|
+| Ask for an update | `/ask what is running?` |
+| Stop current work | `/interrupt` |
+| Disconnect | `/quit` |
+| List sessions | `./target/debug/morse sessions` |
+| Reconnect | `./target/debug/morse connect --session <id>` |
+| Use an existing project | `./target/debug/morse connect --workspace /path/to/project` |
+| Use plain text output | `./target/debug/morse connect --plain` |
 
-On your laptop, run `morse connect`. Keep the server process alive using your normal service manager or terminal multiplexer.
+## Know before using
 
-**Boundary:** this is a single-user host agent, with no authentication or OS sandbox. Bash has the server user's permissions. Keep it bound to loopback and use SSH; do not expose its port to the public internet. Workspace path checks are convenience checks, not an isolation boundary.
+- **Disconnecting is fine:** tasks continue while the server runs. Recent events replay when you reconnect.
+- **Restarting clears history:** files remain, but sessions and task status are held in memory.
+- **Use a trusted machine:** commands have the server user's permissions. There is no login or sandbox. Keep remote access behind an SSH tunnel.
+- **This is a terminal app:** it does not create cloud machines or stream a graphical desktop.
 
-## What persists
+## Learn more
 
-- Tasks survive client disconnection while the server keeps running.
-- Workspace files stay on disk.
-- Sessions, model history, task state, and the last 4,000 events live in memory and are lost on server restart.
-- This version provides a terminal interface and event stream; it does not provision VMs or stream a graphical desktop.
-
-## Develop
-
-```sh
-cargo fmt --all -- --check
-cargo clippy --workspace --all-targets --locked -- -D warnings
-cargo test --workspace --locked
-cargo build --workspace --locked
-```
-
-[Architecture and protocol](docs/architecture.md) · [Operations](docs/operations.md) · [Completion notes](docs/completion.md)
+- [How it works and more examples](docs/how-it-works.md)
+- [Run it on a remote server](docs/operations.md)
+- [Architecture and protocol](docs/architecture.md)
+- [Development checks and completion notes](docs/completion.md)
