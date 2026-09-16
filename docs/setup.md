@@ -113,8 +113,9 @@ MORSE_URL=ws://127.0.0.1:7800/ws morse connect
 export MORSE_TOKEN=$(openssl rand -hex 24)
 ./target/release/morse serve --bind 0.0.0.0:7800
 
-# client
-MORSE_TOKEN=$TOKEN morse connect --url…   # sent as Authorization: Bearer
+# client (URL is positional; MORSE_URL is the default source)
+MORSE_URL=ws://server:7800/ws morse connect --token "$MORSE_TOKEN"
+MORSE_URL=ws://server:7800/ws morse run --token "$MORSE_TOKEN" "run uname -a"
 ```
 
 The token protects HTTP and WebSocket endpoints; `/healthz` stays open. It is a shared secret over plain `ws://` — pair it with TLS (a reverse proxy) or keep the tunnel.

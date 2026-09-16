@@ -127,6 +127,13 @@ async fn serve(bind: &str) -> anyhow::Result<()> {
         )
         .init();
     let addr: std::net::SocketAddr = bind.parse()?;
+    if !addr.ip().is_loopback()
+        && std::env::var("MORSE_TOKEN")
+            .map(|t| t.is_empty())
+            .unwrap_or(true)
+    {
+        println!("warning: binding {addr} without MORSE_TOKEN — anyone who can reach this port can run commands");
+    }
     let provider = morse_core::provider_from_env();
     let demo = provider.is_mock();
     let app = ServerApp::new(provider);
