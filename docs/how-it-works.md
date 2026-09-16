@@ -1,16 +1,16 @@
 # How Morse works
 
-A guide for trying Morse and deciding where it fits in your workflow.
+A guide for trying Morse and deciding where it fits in your workflow. For install steps see [Setup](setup.md).
 
 ## The idea
 
 Morse lets you send work to a computer and watch it happen from your terminal. That computer can be your laptop or a remote server.
 
-A **harness** is the runtime around the agent: it accepts instructions, calls the model, executes tools, records results, and sends updates to you. Morse supplies that runtime.
+A **harness** is the runtime around the agent: it accepts instructions, calls the model, executes tools, records results, and sends updates to you. Morse supplies that runtime, plus persistence (sessions survive restarts) and a second agent for questions.
 
 You get two views:
 
-- **Main stream:** commands, output, file diffs, task plans, and completion messages.
+- **Main stream:** model prose (streaming token-by-token), commands, output, file diffs, task plans, token usage, and completion messages.
 - **Side agent:** answers about the work, without interrupting it or changing files.
 
 ## Follow one request
@@ -34,17 +34,19 @@ sequenceDiagram
     State-->>You: Display completion
 ```
 
-1. The client connects over **WebSocket**, a connection that carries commands to the server and events back to the client.
-2. The server creates a **session**: a workspace directory, instruction queue, model history, task state, and recent event log.
-3. The main worker handles one instruction at a time. The provider chooses tools, the runtime executes them, and their results go back to the provider.
+1. The client connects over **WebSocket**, a connection that carries commands to the server and events back to the client. A REST API exposes the same sessions for scripts.
+2. The server creates a **session**: a workspace directory, instruction queue, model history, task state, and an event log that is written to disk.
+3. The main worker handles one instruction at a time. The provider chooses tools, the runtime executes them, and their results go back to the provider. Model text streams as the provider produces it.
 4. Tool output is sent as it arrives. File writes and edits produce diffs. Plan updates show pending, active, and completed tasks.
 5. `/ask` uses a separate queue and worker. It can answer while the main worker is busy.
 
+At the end of each run the model conversation is written to `history.json`, and every event is appended to `events.jsonl`. Restart the server and the session resumes with that context.
+
 ## What the side agent knows
 
-It sees the current instruction, task list, current tool, recent tool results, and recent activity. In live mode it receives 40 summarized recent events and a short side-conversation history.
+It sees the current instruction, task list, agent prose so far, current tool, recent tool results, token totals, and recent activity. In live mode it receives 40 summarized recent events and a short side-conversation history.
 
-It has **no tools**. Asking it to change a file does not give it the main agent's capabilities. Send work as a normal instruction instead.
+It has **no tools**. Asking it to change a file does not give it the main agent's capabilities. Send work as a normal instruction instead — Morse can run several sessions at once for that.
 
 Answers describe a snapshot taken when the question is handled. Work can advance before the answer reaches you. The side agent does not independently inspect every file or verify the main agent's claims.
 
@@ -52,30 +54,28 @@ Answers describe a snapshot taken when the question is handled. Work can advance
 
 | | Demo mode | Live mode |
 |---|---|---|
-| Setup | No model key | Anthropic key on the server |
+| Setup | No model key | Anthropic or any OpenAI-compatible endpoint |
 | Instructions | Supported command phrases | Natural-language requests |
 | Tool selection | Deterministic parser | Model chooses tools |
 | Side answers | Fixed status summary | Model answers from session context |
 | Shell and file operations | Real | Real |
-| Validation | Covered by automated tests | Paid API calls not yet validated |
+| Streaming | Tool output streams | Tool output and model text both stream |
 
-Both modes use the same session workers, tools, event transport, and terminal client. Model prose arrives after a complete model response; shell output streams during execution.
+Demo mode is also a test harness: all integration tests run against it, so the product's full loop is exercised without API keys.
 
 ## Try a complete example
 
 ### 1. Start the server
 
-From the repository directory, with no model key configured:
-
 ```sh
-cargo build --workspace --locked
-./target/debug/morse serve
+cargo build --release --locked
+./target/release/morse serve
 ```
 
 ### 2. Open the client in another terminal
 
 ```sh
-./target/debug/morse connect
+./target/release/morse connect
 ```
 
 Copy the session ID shown in the status bar if you want to reconnect later.
@@ -94,7 +94,7 @@ You should see `started` before the ten-second pause finishes. The file task is 
 /ask what's done and what's running?
 ```
 
-The demo side answer reports `0/2 tasks done`, the active Bash command, and the pending file task. This is what the README's display example illustrates.
+The demo side answer reports `0/2 tasks done`, the active Bash command, and the pending file task.
 
 ### 5. Inspect the result
 
@@ -104,16 +104,27 @@ After the task finishes:
 read file notes.txt
 ```
 
-The content appears in the tool result. The file lives on the **server**, by default under `~/.morse/sessions/<id>/ws/notes.txt`.
+The content appears in the tool result. The file lives on the **server** under `~/.morse/sessions/<id>/ws/notes.txt`.
+
+### 6. Restart and come back
+
+Stop the server with Ctrl+C, start it again, then:
+
+```sh
+./target/release/morse sessions
+./target/release/morse connect --session <id>
+```
+
+The session is still there, with its task list, replay, and model context intact.
 
 ## Practical use cases
 
-### Run builds or tests on another computer
+### Watch tests on another computer
 
-Start Morse on a server with Rust and your project already installed. Connect through an SSH tunnel, then choose that server's project path:
+Start Morse on a server with Rust and your project installed. Connect through an SSH tunnel, then choose that server's project path:
 
 ```sh
-./target/debug/morse connect --workspace /path/on/server/my-project
+./target/release/morse connect --workspace /path/on/server/my-project
 ```
 
 In the client:
@@ -123,18 +134,26 @@ run cargo test
 /ask what is running?
 ```
 
-You can see output and ask for status during the run. Morse does not clone the repository or provision the server automatically. A Bash call defaults to a 120-second timeout; very long jobs need an appropriate timeout or a separate job runner.
+You can see output and ask for status during the run, disconnect, and reconnect later. Morse does not clone repositories or provision servers. A Bash call defaults to a 120-second timeout; long jobs need a larger `timeout_ms` or a separate job runner.
 
 ### Ask a model to make a focused change
 
-With a live provider configured, a request could be:
+With a live provider configured:
 
 ```text
 Add a /healthz endpoint that returns ok. Run the existing tests and summarize the files changed.
 /ask which step is in progress?
 ```
 
-The model can plan, read, write, edit, and execute commands. Review the actual diff and test output; the plan is the agent's report of its progress. This example describes an intended live workflow, not a verified model result.
+The model can plan, find files (`glob`, `grep`), read, write, edit, and run commands. Review the diff and test output; the plan is the agent's report of its progress.
+
+### Drive it from CI
+
+```sh
+morse run --json "run cargo test" | jq -c 'select(.type=="tool_result")'
+```
+
+`morse run` exits non-zero if the run reports an error or times out, so it can gate a pipeline. The REST API does the same from any language.
 
 ### Run a small file workflow without a model
 
@@ -148,11 +167,11 @@ This is useful for learning the event flow or demonstrating the client with no A
 
 - `/quit` disconnects the client. The main task keeps running while the server stays alive.
 - `morse connect --session <id>` reconnects and replays up to the last 4,000 retained events.
-- `/interrupt` cancels the current run; it does not undo file changes or clear later queued instructions.
-- Restarting the server loses sessions, history, and task state. Workspace files remain on disk.
+- `/interrupt` cancels the current run and kills the command's process group; it does not undo file changes.
+- Restarting the server now **keeps** sessions: state, history, and workspaces are reloaded from disk.
 
 ## Where it fits today
 
-Morse is a terminal-based, single-user agent runtime. It does not provide a browser desktop, video stream, VM provisioning, authentication, or an OS sandbox. Commands run with the server user's permissions.
+Morse is a terminal-based, single-user agent runtime. It does not provide a browser desktop, video stream, VM provisioning, or an OS sandbox. Commands run with the server user's permissions. There is no MCP tool ecosystem, no subagents, and no git automation.
 
-Keep the server on loopback and access remote instances through SSH. Use it on a computer and workspace you control. See [Operations](operations.md) for setup and recovery, and [Architecture](architecture.md) for the protocol and implementation details.
+Keep the server on loopback and access remote instances through SSH or the built-in token over TLS. Use it on a computer and workspace you control. See [Comparison](comparison.md) for how it stacks up against other agents, [Operations](operations.md) for running it, and [Architecture](architecture.md) for the protocol and implementation.

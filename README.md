@@ -2,26 +2,40 @@
 
 **Give an agent a task. Watch it work. Ask another agent for updates.**
 
-Morse runs commands and edits files on your computer or server. One terminal pane shows the work. A second pane answers questions about what is done and what is still running.
+Morse is a small agent harness in Rust that runs work on your computer or a server. One terminal pane shows the work. A second pane answers questions about what is done and what is still running — without stopping the work.
 
-Built in Rust. Includes a demo that works without an API key.
+Built in Rust. Ships with a demo mode that needs no API key.
 
-## A real use case
+## Why Morse
 
-You are running tests on a remote development server. You want to watch the output and check progress without stopping the tests.
+Most coding agents run where you run them and stop when you close the laptop. Morse separates the **server** (a computer that runs commands and edits files) from the **client** (a terminal that watches and steers). That gives you three things:
+
+- **Remote work that survives disconnects.** Close the client; the run continues on the server. Reconnect and replay the log.
+- **A side agent while work continues.** `/ask` is answered from live session state by a second agent, in a separate queue, so long commands are never interrupted.
+- **A small, auditable runtime.** ~3k lines of Rust across three crates, no hidden services.
 
 ```text
-run cargo test
+run cargo test on /srv/my-project
 /ask what is running?
 ```
 
 Morse runs the tests on that server. The side agent reports the active command and task status. You can close the client and reconnect later while the server keeps running.
 
-Connect with `--workspace /path/to/project` to use an existing project on the server. Commands have a default two-minute timeout.
+## Quickstart
 
-## What you see
+Requires Rust, Cargo, and Bash on macOS or Linux.
 
-Try this demo task, then ask the question during the pause:
+```sh
+cargo build --release --locked
+
+# Terminal 1 — the server (demo mode needs no key)
+./target/release/morse serve
+
+# Terminal 2 — the client
+./target/release/morse connect
+```
+
+Try this task, then ask the question during the pause:
 
 ```text
 run echo started && sleep 10 && echo finished then create file notes.txt: built with Morse
@@ -33,81 +47,108 @@ Illustrative terminal view during the pause (output shortened):
 ```text
 ┌─ stream ───────────────────────────────┬─ side agent (/ask …) ─────────────────┐
 │ morse ▸ on it — here's the plan.       │ you ▸ what's done and what's running? │
-│                                       │                                       │
-│ ▸ run echo started && sleep 10 …       │ side ▸ progress: 0/2 tasks done        │
-│ · create file notes.txt               │   [>] run echo started && sleep 10 …  │
-│                                       │   [ ] create file notes.txt           │
-│ $ echo started && sleep 10 …           │                                       │
-│ │ started                             │ currently running: bash               │
-│                                       │ echo started && sleep 10 …            │
-└───────────────────────────────────────┴───────────────────────────────────────┘
-  ● demo mode • session <id>
+│ plan 2 tasks                           │                                       │
+│   ▸ run echo started && sleep 10 …      │ side ▸ working on: run echo …         │
+│   · create file notes.txt               │   progress: 0/2 tasks done            │
+│ $ echo started && sleep 10 …            │   [>] run echo started && sleep 10 …  │
+│ │ started                               │   [ ] create file notes.txt           │
+│                                         │ currently running: bash               │
+└─────────────────────────────────────────┴───────────────────────────────────────┘
+  ● demo mode • 5d8498e4 • ↑0 ↓0
   > /ask what's next?
 ```
 
-After the pause, `finished` appears, `notes.txt` is created, and both tasks are marked complete. The side question does not pause the main task.
+After the pause, `finished` appears, `notes.txt` is created, and both tasks are marked complete.
 
-## How it works
+## Headless mode
 
-1. **You send a task** from your terminal.
-2. **The main agent does the work** using commands and file tools.
-3. **Output appears as it happens**, including file changes and task updates.
-4. **The side agent answers questions** from the current task status and recent activity. It does not change files or pause the work.
-
-All commands run on the computer hosting the Morse server.
-
-## Try it
-
-Requires Rust, Cargo, and Bash on macOS or Linux.
-
-**Terminal 1 — start the server:**
+For CI or scripts, `morse run` sends one instruction and streams the result, exiting non-zero on failure:
 
 ```sh
-cargo build --workspace --locked
-./target/debug/morse serve
+MORSE_URL=ws://server:7800/ws morse run "run cargo test" # human-readable
+MORSE_URL=ws://server:7800/ws morse run --json "run cargo test" | jq .
 ```
 
-**Terminal 2 — open the client:**
+## Providers
 
-```sh
-./target/debug/morse connect
-```
+Morse speaks two model APIs and works with anything compatible. Pick one with env vars on the **server**:
 
-Paste the demo task above. Files are created in `~/.morse/sessions/<id>/ws` on the server.
-
-## Demo or real AI?
-
-| Mode | What you can do |
+| Provider | Setup |
 |---|---|
-| Demo: no key needed | Use `run`, `create file`, `write file`, `read file`, and `list files`. Side questions return a status summary. |
-| AI: Anthropic key needed | Ask for work in plain language, such as “add a health endpoint and run the tests.” The model chooses tools and answers side questions. |
+| Demo (default, no key) | nothing — real commands, scripted tool selection |
+| Anthropic | `MORSE_PROVIDER=anthropic MORSE_API_KEY=sk-ant-…` |
+| OpenAI | `MORSE_PROVIDER=openai MORSE_API_KEY=sk-…` |
+| Any OpenAI-compatible API | `MORSE_PROVIDER=openai MORSE_BASE_URL=…` + optional key |
+| Local models (Ollama, LM Studio, vLLM) | `MORSE_PROVIDER=openai MORSE_BASE_URL=http://127.0.0.1:11434/v1 MORSE_MODEL=qwen3-coder` |
 
-For AI mode, set `ANTHROPIC_API_KEY` or `MORSE_API_KEY` in the server environment and restart it. Use `MORSE_MODEL` to choose a model. Live model calls have not yet been tested with a paid API key.
+`MORSE_MODEL` selects the model. Live text streams token-by-token; tool calls stream as they happen. Add a project `AGENTS.md` to the workspace and Morse loads it into the system prompt automatically.
 
-Demo mode still runs real commands and writes real files. Separate demo steps with ` then `; use `&&` inside a shell command.
+## Sessions that survive restarts
 
-## Useful commands
+Sessions are persisted under `MORSE_HOME` (default `~/.morse`):
+
+```text
+~/.morse/sessions/<id>/
+  meta.json      # id, workspace, created
+  events.jsonl   # append-only event log (rotated at 8 MiB)
+  history.json   # model conversation, so runs continue with context
+  ws/            # default workspace for this session
+```
+
+Restart the server and the sessions come back — status, task list, token counts, and replay. `morse connect --session <id>` attaches to any of them.
+
+## Commands
 
 | Do this | Command |
 |---|---|
+| Start the server | `morse serve --bind 127.0.0.1:7800` |
+| Open the client | `morse connect` |
 | Ask for an update | `/ask what is running?` |
 | Stop current work | `/interrupt` |
+| Show help | `/help` |
 | Disconnect | `/quit` |
-| List sessions | `./target/debug/morse sessions` |
-| Reconnect | `./target/debug/morse connect --session <id>` |
-| Use an existing project | `./target/debug/morse connect --workspace /path/to/project` |
-| Use plain text output | `./target/debug/morse connect --plain` |
+| List sessions | `morse sessions` |
+| Reconnect to a session | `morse connect --session <id>` |
+| Use an existing project | `morse connect --workspace /path/on/server` |
+| Plain text output | `morse connect --plain` |
+| Run one instruction headlessly | `morse run "run cargo test"` |
+| JSON event stream | `morse run --json "run cargo test"` |
+
+## HTTP API
+
+The server exposes the same sessions over REST, so scripts and dashboards can drive it:
+
+```text
+GET  /healthz                                  liveness
+GET  /api/sessions                             list sessions
+POST /api/sessions                             {"workspace": "/path"} create
+GET  /api/sessions/{id}                        status snapshot
+POST /api/sessions/{id}/instruction            {"text": "run ls"}
+POST /api/sessions/{id}/interrupt              cancel current run
+GET  /api/sessions/{id}/events?since=&limit=   event log
+WS   /ws                                       streaming protocol
+```
+
+Set `MORSE_TOKEN` on the server to require `Authorization: Bearer <token>` (WebSocket clients pass `--token`).
 
 ## Know before using
 
-- **Disconnecting is fine:** tasks continue while the server runs. Recent events replay when you reconnect.
-- **Restarting clears history:** files remain, but sessions and task status are held in memory.
-- **Use a trusted machine:** commands have the server user's permissions. There is no login or sandbox. Keep remote access behind an SSH tunnel.
+- **Disconnecting is fine:** tasks continue while the server runs, and state survives restarts.
+- **Commands are unsandboxed:** they run with the server user's permissions. There is no container. Use a dedicated account and keep remote access behind an SSH tunnel or the built-in token.
+- **Single-user by design:** no tenant isolation, quotas, or audit log. Session count is capped (`MORSE_MAX_SESSIONS`, default 64); the oldest idle session is evicted from memory, and its files remain on disk.
 - **This is a terminal app:** it does not create cloud machines or stream a graphical desktop.
 
 ## Learn more
 
-- [How it works and more examples](docs/how-it-works.md)
-- [Run it on a remote server](docs/operations.md)
-- [Architecture and protocol](docs/architecture.md)
-- [Development checks and completion notes](docs/completion.md)
+| Doc | Contents |
+|---|---|
+| [Setup](docs/setup.md) | Install, providers, auth, remote access, services |
+| [How it works](docs/how-it-works.md) | The two agents, the event flow, a full example |
+| [Architecture](docs/architecture.md) | Protocol, persistence, concurrency, boundaries |
+| [Operations](docs/operations.md) | Configuration, recovery, troubleshooting |
+| [Testing](docs/testing.md) | Test layout, how to run everything, CI |
+| [Benchmarks](docs/benchmarks.md) | Micro and end-to-end benchmarks with sample numbers |
+| [Comparison](docs/comparison.md) | How Morse compares to other agent CLIs |
+| [Changelog](CHANGELOG.md) | Release history |
+
+MIT licensed.
