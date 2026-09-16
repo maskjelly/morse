@@ -39,7 +39,7 @@ Morse is a small, self-hosted agent harness for running work on another computer
 - **Server/client split.** Morse is a harness you deploy, not an app you install where you work. Client disconnects and server restarts do not lose work.
 - **Side agent.** A second model call answers status questions from live state in a separate queue. Other tools have subagents, but they run tasks; none exposes a persistent "what is happening right now" pane that never blocks the main run.
 - **Demo mode.** Real commands/files with a deterministic parser, so the full product can be tried and tested in CI without keys.
-- **Small surface.** ~3k lines of Rust in three crates. Everything is readable in an afternoon; there are no plugins, hooks, or hidden daemons.
+- **Small surface.** ~5k lines of Rust in three crates including tests. Everything is readable in an afternoon; there are no plugins, hooks, or hidden daemons.
 
 ## Honest gaps
 

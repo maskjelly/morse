@@ -68,8 +68,8 @@ impl Pane {
 
     fn push(&mut self, item: Item) {
         if self.wrap_width > 0 {
-            self.last_len = wrap_item(&item, self.wrap_width).len();
             let mut lines = wrap_item(&item, self.wrap_width);
+            self.last_len = lines.len();
             self.wrapped.append(&mut lines);
             if self.wrapped.len() > MAX_LINES {
                 let cut = self.wrapped.len() - MAX_LINES;
@@ -108,17 +108,6 @@ impl Pane {
                 return;
             }
         }
-        self.push(Item::streaming(
-            &Style {
-                prefix: "",
-                prefix_color: item.prefix_color,
-                body_color: item.body_color,
-                dim: false,
-            },
-            String::new(),
-        ));
-        // Replace the placeholder with the real item so styling is exact.
-        self.items.pop();
         self.push(item);
     }
 

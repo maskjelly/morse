@@ -12,7 +12,7 @@ Most coding agents run where you run them and stop when you close the laptop. Mo
 
 - **Remote work that survives disconnects.** Close the client; the run continues on the server. Reconnect and replay the log.
 - **A side agent while work continues.** `/ask` is answered from live session state by a second agent, in a separate queue, so long commands are never interrupted.
-- **A small, auditable runtime.** ~3k lines of Rust across three crates, no hidden services.
+- **A small, auditable runtime.** Roughly 5k lines of Rust across three crates, tests included. No hidden services.
 
 ```text
 run cargo test on /srv/my-project
