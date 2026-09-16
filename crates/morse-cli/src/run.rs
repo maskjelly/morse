@@ -42,6 +42,7 @@ pub async fn run_once(
     let mut ours = false;
     let mut working = false;
     let mut failed = false;
+    let mut last_tool_ok: Option<bool> = None;
     let mut in_delta = false;
     let outcome = timeout(deadline, async {
         while let Some(env) = handle.events.recv().await {
@@ -53,6 +54,7 @@ pub async fn run_once(
             match &env.inner {
                 ServerMsg::Hello { replay_seq, .. } => baseline = *replay_seq,
                 ServerMsg::Error { .. } => failed = true,
+                ServerMsg::ToolResult { ok, .. } if ours => last_tool_ok = Some(*ok),
                 ServerMsg::Instruction { text: t } if env.seq > baseline && t == &text => {
                     ours = true;
                 }
@@ -80,6 +82,9 @@ pub async fn run_once(
     }
     if failed {
         anyhow::bail!("run reported an error (see output above)");
+    }
+    if last_tool_ok == Some(false) {
+        anyhow::bail!("the last tool call in the run failed (see output above)");
     }
     Ok(())
 }
@@ -198,6 +203,33 @@ mod tests {
                     && e["chunk"].as_str().unwrap_or("").contains("second")),
             "follow-up instruction did not run: {events}"
         );
+        server.abort();
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn run_once_fails_when_last_tool_fails() {
+        let root = std::env::temp_dir().join(format!("morse-run-fail-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let app = morse_server::App::with_options(
+            Arc::new(morse_core::provider_mock::Mock::new()),
+            root.clone(),
+            None,
+            8,
+        );
+        let (addr, server) = morse_server::serve("127.0.0.1:0".parse().unwrap(), app)
+            .await
+            .unwrap();
+        let result = run_once(
+            "run false".into(),
+            format!("ws://{addr}/ws"),
+            None,
+            None,
+            true,
+            None,
+        )
+        .await;
+        assert!(result.is_err(), "failing tool should exit non-zero");
         server.abort();
         let _ = std::fs::remove_dir_all(&root);
     }

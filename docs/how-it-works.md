@@ -153,7 +153,7 @@ The model can plan, find files (`glob`, `grep`), read, write, edit, and run comm
 morse run --json "run cargo test" | jq -c 'select(.type=="tool_result")'
 ```
 
-`morse run` exits non-zero if the run reports an error or times out, so it can gate a pipeline. The REST API does the same from any language.
+`morse run` exits non-zero if the run reports an error, the last tool call failed, or it times out, so it can gate a pipeline. The REST API does the same from any language.
 
 ### Run a small file workflow without a model
 

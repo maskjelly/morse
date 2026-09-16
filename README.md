@@ -62,7 +62,7 @@ After the pause, `finished` appears, `notes.txt` is created, and both tasks are 
 
 ## Headless mode
 
-For CI or scripts, `morse run` sends one instruction and streams the result, exiting non-zero on failure:
+For CI or scripts, `morse run` sends one instruction and streams the result, exiting non-zero when the run fails (provider error, failing last tool call, or timeout):
 
 ```sh
 MORSE_URL=ws://server:7800/ws morse run "run cargo test" # human-readable
