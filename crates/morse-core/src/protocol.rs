@@ -53,6 +53,8 @@ pub enum ServerMsg {
         provider: String,
         model: Option<String>,
         demo: bool,
+        /// Sequence number of the last replayed event. Live events are higher.
+        replay_seq: u64,
     },
     Instruction {
         text: String,

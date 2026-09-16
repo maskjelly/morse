@@ -214,6 +214,7 @@ pub fn provider_banner(env: &ServerMsg) -> String {
             provider,
             model,
             demo,
+            ..
         } => {
             let llm = match (provider.as_str(), model) {
                 ("mock", _) => "demo mode (no LLM)".to_string(),

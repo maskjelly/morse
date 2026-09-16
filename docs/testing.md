@@ -26,9 +26,9 @@ cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked --
 | Provider integration | `crates/morse-core/tests/providers.rs` | real HTTP against fake OpenAI/Anthropic servers: streaming text, streamed tool-call assembly, usage, retry on 5xx, API error reporting |
 | Server integration | `crates/morse-server/tests/streaming.rs` | live WebSocket: early output, side answers during a running command, disconnect/replay, identical-instruction rerun, interrupt kills process groups, invalid handshakes |
 | Server API/auth/persistence | `crates/morse-server/tests/api.rs` | REST run + event log, token auth (HTTP + WS), restart persistence and resume, idle-session eviction, WS hello |
-| CLI | `crates/morse-cli/src/client.rs` (`#[cfg(test)]`) | rejected handshake stops retrying instead of looping |
+| CLI | `crates/morse-cli/src/run.rs`, `client.rs` (`#[cfg(test)]`) | rejected handshake stops retrying; `morse run --session` executes after replay instead of exiting on old idle events |
 
-Current count: **42 tests** (27 core unit, 6 provider integration, 8 server integration, 1 CLI).
+Current count: **43 tests** (27 core unit, 6 provider integration, 8 server integration, 2 CLI).
 
 ## What each important test proves
 

@@ -413,6 +413,7 @@ async fn handle_socket(app: Arc<App>, mut socket: WebSocket) {
     };
     // Subscribe and snapshot atomically, then send hello and replay before live events.
     let (mut sub, snapshot) = session.subscribe();
+    let replay_seq = snapshot.last().map(|e| e.seq).unwrap_or(0);
     if socket
         .send(wire(ServerMsg::Hello {
             session_id: session.id.clone(),
@@ -420,6 +421,7 @@ async fn handle_socket(app: Arc<App>, mut socket: WebSocket) {
             provider: session.provider.name().to_string(),
             model: session.provider.model(),
             demo: session.provider.is_mock(),
+            replay_seq,
         }))
         .await
         .is_err()

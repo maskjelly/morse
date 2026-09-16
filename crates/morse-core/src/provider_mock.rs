@@ -61,6 +61,15 @@ fn exec_call(seg: &str, _idx: usize) -> (String, Value) {
     if let Some(rest) = seg.strip_prefix("read file ") {
         return ("read_file".into(), json!({"path": rest.trim()}));
     }
+    if let Some(rest) = seg.strip_prefix("glob ") {
+        return ("glob".into(), json!({"pattern": rest.trim()}));
+    }
+    if let Some(rest) = seg.strip_prefix("grep ") {
+        return (
+            "grep".into(),
+            json!({"pattern": rest.trim(), "ignore_case": true}),
+        );
+    }
     if lower.starts_with("list files") {
         return ("list_files".into(), json!({}));
     }
@@ -286,6 +295,12 @@ mod tests {
         assert_eq!(v["content"], "# created by morse\n");
         let (t, _) = exec_call("list files", 3);
         assert_eq!(t, "list_files");
+        let (t, v) = exec_call("glob **/*.rs", 5);
+        assert_eq!(t, "glob");
+        assert_eq!(v["pattern"], "**/*.rs");
+        let (t, v) = exec_call("grep TODO", 6);
+        assert_eq!(t, "grep");
+        assert_eq!(v["pattern"], "TODO");
         let (t, v) = exec_call("do a backflip", 4);
         assert_eq!(t, "bash");
         assert!(v["command"].as_str().unwrap().contains("do a backflip"));

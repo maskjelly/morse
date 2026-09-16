@@ -35,7 +35,12 @@ pub async fn run_once(
         .unwrap_or(600);
     let deadline = Duration::from_secs(seconds);
 
-    let mut started = false;
+    // Replay makes it ambiguous whether an `idle` status belongs to our run, so
+    // only events after the replay boundary (`hello.seq`) and after our own
+    // instruction event count. That makes re-attaching to a finished session safe.
+    let mut baseline = 0u64;
+    let mut ours = false;
+    let mut working = false;
     let mut failed = false;
     let mut in_delta = false;
     let outcome = timeout(deadline, async {
@@ -43,18 +48,22 @@ pub async fn run_once(
             if json {
                 println!("{}", serde_json::to_string(&env)?);
             } else {
-                print_human(&env, &mut in_delta, &mut failed);
+                print_human(&env, &mut in_delta);
             }
             match &env.inner {
-                ServerMsg::Hello { .. } => started = true,
+                ServerMsg::Hello { replay_seq, .. } => baseline = *replay_seq,
+                ServerMsg::Error { .. } => failed = true,
+                ServerMsg::Instruction { text: t } if env.seq > baseline && t == &text => {
+                    ours = true;
+                }
                 ServerMsg::Status {
                     status: StatusKind::Working | StatusKind::Interrupted,
                     ..
-                } => started = true,
+                } if ours => working = true,
                 ServerMsg::Status {
                     status: StatusKind::Idle,
                     ..
-                } if started => return Ok(()),
+                } if working => return Ok(()),
                 _ => {}
             }
         }
@@ -75,7 +84,7 @@ pub async fn run_once(
     Ok(())
 }
 
-fn print_human(env: &Envelope, in_delta: &mut bool, failed: &mut bool) {
+fn print_human(env: &Envelope, in_delta: &mut bool) {
     match &env.inner {
         ServerMsg::Hello { .. } => {
             println!("{}", provider_banner(&env.inner));
@@ -84,7 +93,6 @@ fn print_human(env: &Envelope, in_delta: &mut bool, failed: &mut bool) {
             status: StatusKind::Idle,
             ..
         } => flush_delta(in_delta),
-        ServerMsg::Error { .. } => *failed = true,
         _ => {}
     }
     for item in render(&env.inner) {
@@ -119,5 +127,78 @@ fn flush_delta(in_delta: &mut bool) {
 fn print_style(style: &Style, body: &str) {
     for line in body.lines().filter(|l| !l.is_empty()) {
         println!("{} {line}", style.prefix);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::Value;
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn run_once_attaches_and_runs_after_replay() {
+        let root = std::env::temp_dir().join(format!("morse-run-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let app = morse_server::App::with_options(
+            Arc::new(morse_core::provider_mock::Mock::new()),
+            root.clone(),
+            None,
+            8,
+        );
+        let (addr, server) = morse_server::serve("127.0.0.1:0".parse().unwrap(), app)
+            .await
+            .unwrap();
+        let url = format!("ws://{addr}/ws");
+        let http = format!("http://{addr}");
+
+        // First run creates the session and leaves replayed Working/Idle events.
+        run_once("run echo first".into(), url.clone(), None, None, true, None)
+            .await
+            .unwrap();
+        let sessions: Value = reqwest::get(format!("{http}/api/sessions"))
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let id = sessions[0]["id"].as_str().unwrap().to_string();
+
+        // Second run must not exit on the replayed idle; it should execute.
+        run_once(
+            "run echo second".into(),
+            url,
+            Some(id.clone()),
+            None,
+            true,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let session: Value = reqwest::get(format!("{http}/api/sessions/{id}"))
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(session["instruction"], "run echo second");
+        let events: Value = reqwest::get(format!("{http}/api/sessions/{id}/events"))
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert!(
+            events["events"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|e| e["type"] == "output"
+                    && e["chunk"].as_str().unwrap_or("").contains("second")),
+            "follow-up instruction did not run: {events}"
+        );
+        server.abort();
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

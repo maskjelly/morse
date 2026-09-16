@@ -23,7 +23,7 @@ Requires a stable Rust toolchain and `bash` on the server host.
 ./target/release/morse serve --bind 127.0.0.1:7800
 ```
 
-Without any model key the server starts in **demo mode**: commands and file edits are real, but tool selection comes from a deterministic parser (`run …`, `create file …`, `read file …`, `list files`, chained with ` then ` or `;`). Use it to verify the whole loop without spending API credits.
+Without any model key the server starts in **demo mode**: commands and file edits are real, but tool selection comes from a deterministic parser (`run …`, `create file …`, `read file …`, `list files`, `glob …`, `grep …`, chained with ` then ` or `;`). Use it to verify the whole loop without spending API credits.
 
 Session state and workspaces live under `MORSE_HOME` (default `~/.morse`).
 
