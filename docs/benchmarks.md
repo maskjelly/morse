@@ -19,7 +19,7 @@ cargo bench -p morse-core
 | `tools/bash_echo` | full bash tool round trip (spawn, pipe, drain, exit) |
 | `tools/write_file_8k` | writing 8 KiB plus generating a diff |
 
-Sample run (Apple Silicon, release, August 2026 — numbers are machine-dependent, rerun locally):
+Sample run (Apple Silicon, release, September 2026 — numbers are machine-dependent, rerun locally):
 
 | Benchmark | Time |
 |---|---|

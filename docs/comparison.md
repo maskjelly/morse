@@ -1,6 +1,6 @@
 # Comparison with other agent CLIs
 
-Morse is a small, self-hosted agent harness for running work on another computer and watching it from a terminal. This page is an honest map of where it stands in August 2026. Competitor facts come from their public docs and 2026 comparisons; verify them against the vendors before making decisions.
+Morse is a small, self-hosted agent harness for running work on another computer and watching it from a terminal. This page is an honest map of where it stands in September 2026. Competitor facts come from their public docs and 2026 comparisons; verify them against the vendors before making decisions.
 
 ## Feature matrix
 
