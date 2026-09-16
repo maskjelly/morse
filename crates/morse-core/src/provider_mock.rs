@@ -151,6 +151,7 @@ impl Provider for Mock {
                     text: "side queries are answered locally in demo mode".into(),
                 }],
                 stop_reason: "end_turn".into(),
+                usage: Default::default(),
             });
         }
         let instruction = last_user_text(&req.messages).unwrap_or_default();
@@ -172,6 +173,7 @@ impl Provider for Mock {
                     text: "nothing to do — give me an instruction like: run <cmd> then create file <path>: <content>".into(),
                 }],
                 stop_reason: "end_turn".into(),
+                usage: Default::default(),
             });
         }
         if req.messages.last().is_some_and(|m| {
@@ -182,6 +184,7 @@ impl Provider for Mock {
             return Ok(ChatResponse {
                 blocks: vec![Block::Text { text: "stopped: a tool failed; see its result above. Remaining tasks are unfinished.".into() }],
                 stop_reason: "end_turn".into(),
+                usage: Default::default(),
             });
         }
         let n = entry.segments.len();
@@ -240,6 +243,7 @@ impl Provider for Mock {
         Ok(ChatResponse {
             blocks,
             stop_reason: stop_reason.to_string(),
+            usage: Default::default(),
         })
     }
 }

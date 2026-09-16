@@ -51,6 +51,8 @@ impl Color {
 
 pub enum Render {
     Main(Style, String),
+    /// Streaming agent prose fragment: append to the previous main item.
+    MainAppend(Style, String),
     Side(Style, String),
 }
 
@@ -84,7 +86,21 @@ pub fn render(msg: &ServerMsg) -> Vec<Render> {
             },
             text.clone(),
         )),
+        ServerMsg::AgentDelta { text } => out.push(Render::MainAppend(
+            Style {
+                prefix: "morse ▸",
+                prefix_color: Color::Magenta,
+                body_color: Color::White,
+                dim: false,
+            },
+            text.clone(),
+        )),
+        ServerMsg::Usage { .. } => {}
         ServerMsg::ToolCall { id, tool, input } => {
+            if tool == "plan" {
+                // The Plan event below is the canonical checklist view.
+                return out;
+            }
             let sum = morse_core::tools::summarize_input(tool, input);
             let (prefix, color) = match tool.as_str() {
                 "bash" => ("  $", Color::Yellow),
@@ -118,12 +134,16 @@ pub fn render(msg: &ServerMsg) -> Vec<Render> {
             ));
         }
         ServerMsg::ToolResult {
+            tool,
             ok,
             exit_code,
             duration_ms,
             summary,
             ..
         } => {
+            if tool == "plan" {
+                return out;
+            }
             let (mark, color) = ok_mark(*ok);
             let exit = match exit_code {
                 Some(c) => format!("exit {c}"),

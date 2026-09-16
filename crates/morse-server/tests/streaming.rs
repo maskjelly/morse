@@ -38,7 +38,12 @@ async fn until(ws: &mut Socket, predicate: impl Fn(&ServerMsg) -> bool) -> Vec<E
 #[tokio::test]
 async fn streaming_side_agent_disconnect_replay_and_repeat() {
     let root = std::env::temp_dir().join(format!("morse-e2e-{}", morse_core::new_session_id()));
-    let app = morse_server::App::new(Arc::new(morse_core::provider_mock::Mock::new()));
+    let app = morse_server::App::with_options(
+        Arc::new(morse_core::provider_mock::Mock::new()),
+        root.clone(),
+        None,
+        64,
+    );
     let (addr, server) = morse_server::serve("127.0.0.1:0".parse().unwrap(), app)
         .await
         .unwrap();
@@ -127,7 +132,12 @@ async fn streaming_side_agent_disconnect_replay_and_repeat() {
 async fn interrupt_kills_command_and_accepts_next_instruction() {
     let root: PathBuf =
         std::env::temp_dir().join(format!("morse-interrupt-{}", morse_core::new_session_id()));
-    let app = morse_server::App::new(Arc::new(morse_core::provider_mock::Mock::new()));
+    let app = morse_server::App::with_options(
+        Arc::new(morse_core::provider_mock::Mock::new()),
+        root.clone(),
+        None,
+        64,
+    );
     let (addr, server) = morse_server::serve("127.0.0.1:0".parse().unwrap(), app)
         .await
         .unwrap();
@@ -174,7 +184,14 @@ async fn interrupt_kills_command_and_accepts_next_instruction() {
 
 #[tokio::test]
 async fn rejects_invalid_handshake() {
-    let app = morse_server::App::new(Arc::new(morse_core::provider_mock::Mock::new()));
+    let root =
+        std::env::temp_dir().join(format!("morse-handshake-{}", morse_core::new_session_id()));
+    let app = morse_server::App::with_options(
+        Arc::new(morse_core::provider_mock::Mock::new()),
+        root,
+        None,
+        64,
+    );
     let (addr, server) = morse_server::serve("127.0.0.1:0".parse().unwrap(), app)
         .await
         .unwrap();

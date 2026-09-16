@@ -5,6 +5,7 @@ use morse_server::App as ServerApp;
 mod client;
 mod plain;
 mod render;
+mod run;
 mod tui;
 
 #[derive(Parser)]
@@ -39,11 +40,36 @@ enum Cmd {
         /// Plain line-oriented mode instead of the TUI
         #[arg(long)]
         plain: bool,
+        /// Bearer token for a server started with MORSE_TOKEN
+        #[arg(long, env = "MORSE_TOKEN", hide_env_values = true)]
+        token: Option<String>,
+    },
+    /// Run one instruction headlessly and stream the result (CI-friendly)
+    Run {
+        /// Instruction text
+        text: String,
+        /// Server websocket url
+        url: Option<String>,
+        /// Attach to an existing session instead of creating one
+        #[arg(long)]
+        session: Option<String>,
+        /// Server-side workspace path for a new session
+        #[arg(long)]
+        workspace: Option<String>,
+        /// Emit one JSON object per event instead of formatted text
+        #[arg(long)]
+        json: bool,
+        /// Bearer token for a server started with MORSE_TOKEN
+        #[arg(long, env = "MORSE_TOKEN", hide_env_values = true)]
+        token: Option<String>,
     },
     /// List sessions on a server
     Sessions {
         /// Server websocket url
         url: Option<String>,
+        /// Bearer token for a server started with MORSE_TOKEN
+        #[arg(long, env = "MORSE_TOKEN", hide_env_values = true)]
+        token: Option<String>,
     },
 }
 
@@ -61,8 +87,36 @@ async fn main() -> anyhow::Result<()> {
             session,
             workspace,
             plain,
-        } => connect(url.unwrap_or_else(default_url), session, workspace, plain).await,
-        Cmd::Sessions { url } => sessions(url.unwrap_or_else(default_url)).await,
+            token,
+        } => {
+            connect(
+                url.unwrap_or_else(default_url),
+                session,
+                workspace,
+                plain,
+                token,
+            )
+            .await
+        }
+        Cmd::Run {
+            text,
+            url,
+            session,
+            workspace,
+            json,
+            token,
+        } => {
+            run::run_once(
+                text,
+                url.unwrap_or_else(default_url),
+                session,
+                workspace,
+                json,
+                token,
+            )
+            .await
+        }
+        Cmd::Sessions { url, token } => sessions(url.unwrap_or_else(default_url), token).await,
     }
 }
 
@@ -98,11 +152,13 @@ async fn connect(
     session: Option<String>,
     workspace: Option<String>,
     is_plain: bool,
+    token: Option<String>,
 ) -> anyhow::Result<()> {
     let cfg = client::ClientConfig {
         url,
         session,
         workspace,
+        token,
     };
     if is_plain {
         tracing_subscriber::fmt()
@@ -117,8 +173,8 @@ async fn connect(
     }
 }
 
-async fn sessions(url: String) -> anyhow::Result<()> {
-    let list = client::list_sessions(&url).await?;
+async fn sessions(url: String, token: Option<String>) -> anyhow::Result<()> {
+    let list = client::list_sessions(&url, token.as_deref()).await?;
     let arr = list.as_array().cloned().unwrap_or_default();
     if arr.is_empty() {
         println!("no sessions");

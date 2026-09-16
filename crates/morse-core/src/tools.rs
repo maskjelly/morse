@@ -2,6 +2,7 @@ use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
+use globset::Glob;
 use serde_json::Value;
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::Command;
@@ -13,6 +14,8 @@ use crate::protocol::{ServerMsg, StreamKind, TaskStatus, TaskView};
 const ACC_CAP: usize = 256 * 1024;
 const READ_CAP: usize = 256 * 1024;
 const BASH_DEFAULT_TIMEOUT_MS: u64 = 120_000;
+const WALK_CAP: usize = 50_000;
+const GREP_FILE_CAP: u64 = 2 * 1024 * 1024;
 
 pub struct ToolCtx<'a> {
     pub workspace: &'a Path,
@@ -62,6 +65,19 @@ pub fn summarize_input(tool: &str, input: &Value) -> String {
             .and_then(|v| v.as_str())
             .unwrap_or(".")
             .to_string(),
+        "glob" => input
+            .get("pattern")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string(),
+        "grep" => match (
+            input.get("pattern").and_then(|v| v.as_str()),
+            input.get("glob").and_then(|v| v.as_str()),
+        ) {
+            (Some(p), Some(g)) => format!("{p} ({g})"),
+            (Some(p), None) => p.to_string(),
+            _ => String::new(),
+        },
         "plan" => {
             let n = input
                 .get("tasks")
@@ -106,6 +122,8 @@ pub async fn exec_tool(name: &str, input: &Value, ctx: &mut ToolCtx<'_>) -> Tool
         "write_file" => write_file(input, ctx).await,
         "edit_file" => edit_file(input, ctx).await,
         "list_files" => list_files(input, ctx.workspace).await,
+        "glob" => glob_files(input, ctx.workspace).await,
+        "grep" => grep_files(input, ctx.workspace).await,
         "plan" => plan(input, ctx),
         other => Ok(ToolOutcome {
             output: format!("unknown tool: {other}"),
@@ -284,6 +302,147 @@ async fn list_files(input: &Value, workspace: &Path) -> Result<ToolOutcome> {
         ok: true,
         ..Default::default()
     })
+}
+
+async fn glob_files(input: &Value, workspace: &Path) -> Result<ToolOutcome> {
+    let pattern = str_field(input, "pattern")?;
+    let matcher = Glob::new(pattern)
+        .with_context(|| format!("invalid glob pattern: {pattern}"))?
+        .compile_matcher();
+    let rel_dir = input.get("path").and_then(|v| v.as_str()).unwrap_or(".");
+    let root = safe_path(workspace, rel_dir)?;
+    let max = input.get("max").and_then(|v| v.as_u64()).unwrap_or(200) as usize;
+
+    let mut out = String::new();
+    let mut shown = 0usize;
+    let mut truncated = false;
+    for path in walk_files(&root) {
+        let rel = path.strip_prefix(workspace).unwrap_or(&path);
+        if !matcher.is_match(rel) {
+            continue;
+        }
+        if shown >= max {
+            truncated = true;
+            break;
+        }
+        out.push_str(&format!("{}\n", rel.display()));
+        shown += 1;
+    }
+    if shown == 0 {
+        out = format!("no files match {pattern}\n");
+    } else if truncated {
+        out.push_str("... (truncated)\n");
+    }
+    Ok(ToolOutcome {
+        output: out,
+        ok: true,
+        truncated,
+        ..Default::default()
+    })
+}
+
+async fn grep_files(input: &Value, workspace: &Path) -> Result<ToolOutcome> {
+    let pattern = str_field(input, "pattern")?;
+    let ignore_case = input
+        .get("ignore_case")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let re = regex::RegexBuilder::new(pattern)
+        .case_insensitive(ignore_case)
+        .build()
+        .with_context(|| format!("invalid regex pattern: {pattern}"))?;
+    let file_filter = match input.get("glob").and_then(|v| v.as_str()) {
+        Some(g) => Some(
+            Glob::new(g)
+                .with_context(|| format!("invalid glob filter: {g}"))?
+                .compile_matcher(),
+        ),
+        None => None,
+    };
+    let rel_dir = input.get("path").and_then(|v| v.as_str()).unwrap_or(".");
+    let root = safe_path(workspace, rel_dir)?;
+    let max = input.get("max").and_then(|v| v.as_u64()).unwrap_or(100) as usize;
+
+    let mut out = String::new();
+    let mut matches = 0usize;
+    let mut truncated = false;
+    'files: for path in walk_files(&root) {
+        let rel = path.strip_prefix(workspace).unwrap_or(&path);
+        if let Some(filter) = &file_filter {
+            if !filter.is_match(rel) {
+                continue;
+            }
+        }
+        if path
+            .metadata()
+            .map(|m| m.len() > GREP_FILE_CAP)
+            .unwrap_or(true)
+        {
+            continue;
+        }
+        let Ok(bytes) = std::fs::read(&path) else {
+            continue;
+        };
+        if bytes[..bytes.len().min(8192)].contains(&0) {
+            continue;
+        }
+        let text = String::from_utf8_lossy(&bytes);
+        for (i, line) in text.lines().enumerate() {
+            if !re.is_match(line) {
+                continue;
+            }
+            if matches >= max {
+                truncated = true;
+                break 'files;
+            }
+            let snippet: String = line.trim_end().chars().take(240).collect();
+            out.push_str(&format!("{}:{}: {snippet}\n", rel.display(), i + 1));
+            matches += 1;
+        }
+    }
+    if matches == 0 {
+        out = format!("no matches for {pattern}\n");
+    }
+    Ok(ToolOutcome {
+        output: out,
+        ok: true,
+        truncated,
+        ..Default::default()
+    })
+}
+
+/// Walk regular files under `root`, skipping hidden entries and build dirs.
+fn walk_files(root: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        let mut items: Vec<_> = entries.flatten().collect();
+        items.sort_by_key(|e| e.file_name());
+        for entry in items {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name.starts_with('.') || name == "target" || name == "node_modules" {
+                continue;
+            }
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            let path = entry.path();
+            if kind.is_dir() {
+                stack.push(path);
+            } else if kind.is_file() {
+                out.push(path);
+                if out.len() >= WALK_CAP {
+                    return out;
+                }
+            }
+        }
+    }
+    out.sort();
+    out
 }
 
 async fn bash(input: &Value, ctx: &mut ToolCtx<'_>) -> Result<ToolOutcome> {
@@ -545,6 +704,69 @@ mod tests {
         let out = exec_tool("bash", &serde_json::json!({}), &mut ctx).await;
         assert!(!out.ok);
         assert!(out.output.contains("missing field"));
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[tokio::test]
+    async fn glob_and_grep_find_workspace_files() {
+        let ws = tmp_ws("glob");
+        std::fs::create_dir_all(ws.join("src/deep")).unwrap();
+        std::fs::write(ws.join("src/lib.rs"), "pub fn hello() {}\n").unwrap();
+        std::fs::write(ws.join("src/deep/mod.rs"), "fn deep() {}\n").unwrap();
+        std::fs::write(ws.join("README.md"), "Hello World\nsecond line\n").unwrap();
+        std::fs::create_dir_all(ws.join("target")).unwrap();
+        std::fs::write(ws.join("target/junk.rs"), "fn ignored() {}\n").unwrap();
+
+        let cancel = CancellationToken::new();
+        let mut emit = |_: ServerMsg| {};
+        let mut ctx = ToolCtx {
+            workspace: &ws,
+            emit: &mut emit,
+            cancel: &cancel,
+        };
+
+        let out = exec_tool("glob", &serde_json::json!({"pattern": "**/*.rs"}), &mut ctx).await;
+        assert!(out.ok);
+        assert!(out.output.contains("src/lib.rs"), "{}", out.output);
+        assert!(out.output.contains("src/deep/mod.rs"), "{}", out.output);
+        assert!(!out.output.contains("target/"), "{}", out.output);
+
+        let out = exec_tool(
+            "grep",
+            &serde_json::json!({"pattern": "hello", "ignore_case": true}),
+            &mut ctx,
+        )
+        .await;
+        assert!(out.ok);
+        assert!(
+            out.output.contains("README.md:1: Hello World"),
+            "{}",
+            out.output
+        );
+        assert!(
+            out.output.contains("src/lib.rs:1: pub fn hello() {}"),
+            "{}",
+            out.output
+        );
+
+        let out = exec_tool(
+            "grep",
+            &serde_json::json!({"pattern": "^fn", "glob": "**/*.rs"}),
+            &mut ctx,
+        )
+        .await;
+        assert!(out.ok);
+        assert!(out.output.contains("src/deep/mod.rs:1"), "{}", out.output);
+        assert!(!out.output.contains("README"), "{}", out.output);
+
+        let out = exec_tool(
+            "glob",
+            &serde_json::json!({"pattern": "[", "path": "."}),
+            &mut ctx,
+        )
+        .await;
+        assert!(!out.ok, "invalid glob should fail");
+
         let _ = std::fs::remove_dir_all(&ws);
     }
 }

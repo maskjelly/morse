@@ -21,10 +21,13 @@ pub struct SessionState {
     pub status: StatusKind,
     pub status_detail: Option<String>,
     pub instruction: Option<String>,
+    pub agent_text: String,
     pub tasks: Vec<TaskView>,
     pub current_tool: Option<RecentTool>,
     pub recent_tools: VecDeque<RecentTool>,
     pub side_turns: VecDeque<(String, String)>,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
 }
 
 impl SessionState {
@@ -41,6 +44,19 @@ impl SessionState {
                 self.instruction = Some(text.clone());
                 self.status = StatusKind::Working;
                 self.status_detail = Some(text.clone());
+                self.agent_text.clear();
+            }
+            ServerMsg::AgentDelta { text } => {
+                if self.agent_text.len() < 64 * 1024 {
+                    self.agent_text.push_str(text);
+                }
+            }
+            ServerMsg::Usage {
+                input_tokens,
+                output_tokens,
+            } => {
+                self.input_tokens += input_tokens;
+                self.output_tokens += output_tokens;
             }
             ServerMsg::Plan { tasks } => {
                 self.tasks = tasks.clone();
@@ -124,6 +140,9 @@ impl SessionState {
             "tasks": tasks,
             "tasks_completed": done,
             "tasks_total": self.tasks.len(),
+            "agent_text": self.agent_text,
+            "input_tokens": self.input_tokens,
+            "output_tokens": self.output_tokens,
             "current_tool": self.current_tool.as_ref().map(|rt| {
                 json!({"tool": rt.tool, "summary": rt.summary})
             }),
@@ -212,6 +231,7 @@ pub fn brief(msg: &ServerMsg) -> Option<String> {
     Some(match msg {
         ServerMsg::Instruction { text } => format!("user: {}", clip(text, 80)),
         ServerMsg::AgentText { text } => format!("morse: {}", clip(text, 100)),
+        ServerMsg::AgentDelta { .. } | ServerMsg::Usage { .. } => return None,
         ServerMsg::ToolCall { tool, input, .. } => {
             let sum = crate::tools::summarize_input(tool, input);
             format!("call {tool}: {}", clip(&sum, 80))

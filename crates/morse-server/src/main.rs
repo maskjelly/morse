@@ -17,9 +17,10 @@ async fn main() -> anyhow::Result<()> {
     let provider = provider_from_env();
     let demo = provider.is_mock();
     let app = morse_server::App::new(provider);
+    let restored = app.load_sessions().await;
     let (addr, handle) = serve(bind, app).await?;
     tracing::info!(
-        "morse server listening on ws://{addr}/ws ({} mode)",
+        "morse server listening on ws://{addr}/ws ({} mode, {restored} restored session(s))",
         if demo { "demo" } else { "live" }
     );
     println!("morse server listening on ws://{addr}/ws");

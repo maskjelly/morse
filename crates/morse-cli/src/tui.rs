@@ -21,6 +21,7 @@ struct Item {
     prefix_color: Color,
     body: String,
     body_color: Color,
+    streaming: bool,
 }
 
 impl Item {
@@ -30,6 +31,14 @@ impl Item {
             prefix_color: style.prefix_color,
             body,
             body_color: style.body_color,
+            streaming: false,
+        }
+    }
+
+    fn streaming(style: &Style, body: String) -> Self {
+        Self {
+            streaming: true,
+            ..Self::from(style, body)
         }
     }
 }
@@ -40,6 +49,7 @@ struct Pane {
     wrap_width: usize,
     scroll: usize,
     follow: bool,
+    last_len: usize,
 }
 
 const MAX_LINES: usize = 8000;
@@ -52,11 +62,13 @@ impl Pane {
             wrap_width: 0,
             scroll: 0,
             follow: true,
+            last_len: 0,
         }
     }
 
     fn push(&mut self, item: Item) {
         if self.wrap_width > 0 {
+            self.last_len = wrap_item(&item, self.wrap_width).len();
             let mut lines = wrap_item(&item, self.wrap_width);
             self.wrapped.append(&mut lines);
             if self.wrapped.len() > MAX_LINES {
@@ -74,12 +86,53 @@ impl Pane {
         }
     }
 
+    /// Append a streaming fragment to the previous agent item, or start one.
+    fn append(&mut self, item: Item) {
+        if let Some(last) = self.items.last_mut() {
+            if last.streaming && last.prefix == item.prefix {
+                last.body.push_str(&item.body);
+                if self.wrap_width > 0 {
+                    let lines = wrap_item(last, self.wrap_width);
+                    self.wrapped
+                        .truncate(self.wrapped.len().saturating_sub(self.last_len));
+                    self.last_len = lines.len();
+                    self.wrapped.extend(lines);
+                    if self.wrapped.len() > MAX_LINES {
+                        let cut = self.wrapped.len() - MAX_LINES;
+                        self.wrapped.drain(0..cut);
+                    }
+                }
+                if self.follow {
+                    self.scroll = 0;
+                }
+                return;
+            }
+        }
+        self.push(Item::streaming(
+            &Style {
+                prefix: "",
+                prefix_color: item.prefix_color,
+                body_color: item.body_color,
+                dim: false,
+            },
+            String::new(),
+        ));
+        // Replace the placeholder with the real item so styling is exact.
+        self.items.pop();
+        self.push(item);
+    }
+
     fn set_width(&mut self, w: usize) {
         if self.wrap_width == w {
             return;
         }
         self.wrap_width = w;
         self.wrapped = self.items.iter().flat_map(|i| wrap_item(i, w)).collect();
+        self.last_len = self
+            .items
+            .last()
+            .map(|i| wrap_item(i, w).len())
+            .unwrap_or(0);
     }
 
     fn page_up(&mut self) {
@@ -177,6 +230,8 @@ pub struct App {
     session: Option<String>,
     demo: bool,
     provider: String,
+    input_tokens: u64,
+    output_tokens: u64,
 }
 
 impl App {
@@ -197,6 +252,8 @@ impl App {
             session: None,
             demo: false,
             provider: String::new(),
+            input_tokens: 0,
+            output_tokens: 0,
         }
     }
 
@@ -211,7 +268,17 @@ impl App {
         if text.is_empty() {
             return;
         }
-        if let Some(q) = text.strip_prefix("/ask ") {
+        if text == "/help" || text == "/?" {
+            self.main.push(Item::from(
+                &Style {
+                    prefix: "help ▸",
+                    prefix_color: Color::Blue,
+                    body_color: Color::White,
+                    dim: false,
+                },
+                "commands:\n/ask <question> — ask the side agent about progress\n/interrupt — cancel the current run\n/quit — disconnect (work keeps running on the server)\nkeys: tab switches panes, pgup/pgdn scroll, ctrl-c quits".to_string(),
+            ));
+        } else if let Some(q) = text.strip_prefix("/ask ") {
             self.send(ClientMsg::SideQuery {
                 text: q.to_string(),
             });
@@ -241,11 +308,21 @@ impl App {
                 ServerMsg::Status { status, .. } => {
                     self.status = *status;
                 }
+                ServerMsg::Usage {
+                    input_tokens,
+                    output_tokens,
+                } => {
+                    self.input_tokens += input_tokens;
+                    self.output_tokens += output_tokens;
+                }
                 _ => {}
             }
             for r in render(&env.inner) {
                 match r {
                     Render::Main(style, body) => self.main.push(Item::from(&style, body)),
+                    Render::MainAppend(style, body) => {
+                        self.main.append(Item::streaming(&style, body))
+                    }
                     Render::Side(style, body) => self.side.push(Item::from(&style, body)),
                 }
             }
@@ -409,10 +486,15 @@ fn build_status(app: &App) -> Line<'static> {
     } else {
         app.provider.clone()
     };
+    let tokens = if app.input_tokens + app.output_tokens > 0 {
+        format!(" • ↑{} ↓{}", app.input_tokens, app.output_tokens)
+    } else {
+        String::new()
+    };
     Line::from(vec![
         Span::styled(dot, RStyle::default().fg(dot_color.ratatui())),
         Span::raw(format!(
-            " {mode} • {} • ",
+            " {mode} • {}{tokens} • ",
             app.session.as_deref().unwrap_or("connecting…")
         )),
         Span::styled(

@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use crate::llm::{Block, ChatMessage, ChatRequest, Purpose};
 use crate::session::Session;
 use crate::state::brief;
@@ -10,9 +8,15 @@ agent's live event stream and answer the user's side questions. Do not perform w
 Answer briefly and factually: what's done, what's in progress, what's next, any errors. \
 One to six lines, no preamble.";
 
-pub async fn runner(session: Arc<Session>, mut rx: tokio::sync::mpsc::UnboundedReceiver<String>) {
+pub async fn runner(
+    session: std::sync::Weak<Session>,
+    mut rx: tokio::sync::mpsc::UnboundedReceiver<String>,
+) {
     let mut history: Vec<ChatMessage> = Vec::new();
     while let Some(question) = rx.recv().await {
+        let Some(session) = session.upgrade() else {
+            break;
+        };
         let answer = answer(session.as_ref(), &mut history, &question).await;
         session.emit(crate::protocol::ServerMsg::Side { question, answer });
     }

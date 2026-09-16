@@ -1,13 +1,19 @@
+use std::future::Future;
+use std::time::Duration;
+
 use async_trait::async_trait;
+use serde::Deserialize;
 use serde_json::{json, Value};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Role {
     User,
     Assistant,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Block {
     Text {
         text: String,
@@ -24,7 +30,7 @@ pub enum Block {
     },
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, Deserialize)]
 pub struct ChatMessage {
     pub role: Role,
     pub blocks: Vec<Block>,
@@ -86,6 +92,19 @@ pub struct ChatRequest {
 pub struct ChatResponse {
     pub blocks: Vec<Block>,
     pub stop_reason: String,
+    pub usage: Usage,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Usage {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+}
+
+impl Usage {
+    pub fn is_zero(&self) -> bool {
+        self.input_tokens == 0 && self.output_tokens == 0
+    }
 }
 
 impl ChatResponse {
@@ -119,6 +138,62 @@ pub trait Provider: Send + Sync {
         false
     }
     async fn complete(&self, req: &ChatRequest) -> anyhow::Result<ChatResponse>;
+
+    /// Complete a request while streaming text deltas to `on_text`.
+    /// Providers that support live streaming override this; the default
+    /// buffers the full response and emits each text block once.
+    async fn complete_stream(
+        &self,
+        req: &ChatRequest,
+        on_text: &mut (dyn FnMut(String) + Send),
+    ) -> anyhow::Result<ChatResponse> {
+        let resp = self.complete(req).await?;
+        for block in &resp.blocks {
+            if let Block::Text { text } = block {
+                on_text(text.clone());
+            }
+        }
+        Ok(resp)
+    }
+}
+
+pub const HTTP_ATTEMPTS: u32 = 3;
+
+/// Retry transient HTTP failures (network errors, 408/409/429/5xx) with backoff.
+/// The final attempt always returns the response or error so callers can report it.
+pub async fn retry_request<F, Fut>(mut send: F) -> anyhow::Result<reqwest::Response>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = anyhow::Result<reqwest::Response>>,
+{
+    let mut attempt = 0;
+    loop {
+        attempt += 1;
+        match send().await {
+            Ok(resp) => {
+                let retryable = matches!(
+                    resp.status().as_u16(),
+                    408 | 409 | 425 | 429 | 500 | 502 | 503 | 504 | 529
+                );
+                if !retryable || attempt >= HTTP_ATTEMPTS {
+                    return Ok(resp);
+                }
+                tracing::warn!(
+                    "provider http {}: retrying ({attempt}/{HTTP_ATTEMPTS})",
+                    resp.status()
+                );
+            }
+            Err(e) => {
+                if attempt >= HTTP_ATTEMPTS {
+                    return Err(e);
+                }
+                tracing::warn!(
+                    "provider request failed: {e:#}; retrying ({attempt}/{HTTP_ATTEMPTS})"
+                );
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(250 * 3u64.pow(attempt - 1))).await;
+    }
 }
 
 pub fn tool_specs() -> Vec<ToolSpec> {
@@ -175,6 +250,34 @@ pub fn tool_specs() -> Vec<ToolSpec> {
             }),
         },
         ToolSpec {
+            name: "glob",
+            description: "Find files by glob pattern, e.g. '**/*.rs' or 'src/**/*.toml'.".into(),
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "pattern": {"type": "string"},
+                    "path": {"type": "string", "description": "relative dir to search from, default ."},
+                    "max": {"type": "integer", "description": "max results, default 200"}
+                },
+                "required": ["pattern"]
+            }),
+        },
+        ToolSpec {
+            name: "grep",
+            description: "Search file contents with a regular expression.".into(),
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "pattern": {"type": "string", "description": "regex"},
+                    "path": {"type": "string", "description": "relative dir to search from, default ."},
+                    "glob": {"type": "string", "description": "only files matching this glob"},
+                    "ignore_case": {"type": "boolean"},
+                    "max": {"type": "integer", "description": "max matches, default 100"}
+                },
+                "required": ["pattern"]
+            }),
+        },
+        ToolSpec {
             name: "plan",
             description: "Publish or update the user-visible task checklist. Call whenever tasks or their statuses change.".into(),
             schema: json!({
@@ -200,8 +303,35 @@ pub fn tool_specs() -> Vec<ToolSpec> {
 
 pub fn provider_from_env() -> std::sync::Arc<dyn Provider> {
     use std::sync::Arc;
-    if let Some(p) = crate::provider_anthropic::Anthropic::from_env() {
-        return Arc::new(p);
+    let explicit = std::env::var("MORSE_PROVIDER")
+        .ok()
+        .map(|s| s.to_lowercase());
+    if let Some(name) = explicit.as_deref() {
+        match name {
+            "mock" | "demo" => return Arc::new(crate::provider_mock::Mock::new()),
+            "openai" => {
+                if let Some(p) = crate::provider_openai::OpenAi::from_env() {
+                    return Arc::new(p);
+                }
+            }
+            "anthropic" => {
+                if let Some(p) = crate::provider_anthropic::Anthropic::from_env() {
+                    return Arc::new(p);
+                }
+            }
+            other => tracing::warn!("unknown MORSE_PROVIDER '{other}', auto-detecting"),
+        }
+    } else {
+        if std::env::var("MORSE_BASE_URL").is_ok() || std::env::var("OPENAI_API_KEY").is_ok() {
+            if let Some(p) = crate::provider_openai::OpenAi::from_env() {
+                return Arc::new(p);
+            }
+        }
+        if std::env::var("ANTHROPIC_API_KEY").is_ok() || std::env::var("MORSE_API_KEY").is_ok() {
+            if let Some(p) = crate::provider_anthropic::Anthropic::from_env() {
+                return Arc::new(p);
+            }
+        }
     }
     tracing::warn!("no LLM configured: running in demo mode with the mock provider");
     Arc::new(crate::provider_mock::Mock::new())
@@ -225,6 +355,7 @@ mod tests {
                 },
             ],
             stop_reason: "tool_use".into(),
+            usage: Usage::default(),
         };
         assert_eq!(r.text(), "on it");
         assert_eq!(r.tool_uses().len(), 1);
@@ -234,7 +365,7 @@ mod tests {
     #[test]
     fn tool_specs_have_schemas() {
         let specs = tool_specs();
-        assert_eq!(specs.len(), 6);
+        assert_eq!(specs.len(), 8);
         for s in &specs {
             assert_eq!(s.schema["type"], "object");
         }

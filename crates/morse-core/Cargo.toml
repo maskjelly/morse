@@ -16,6 +16,18 @@ reqwest = { workspace = true }
 uuid = { workspace = true }
 similar = { workspace = true }
 tracing = { workspace = true }
+regex = { workspace = true }
+globset = { workspace = true }
+futures-util = { workspace = true }
+
+[dev-dependencies]
+axum = { workspace = true }
+tokio-tungstenite = { workspace = true }
+criterion = { workspace = true }
+
+[[bench]]
+name = "core"
+harness = false
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

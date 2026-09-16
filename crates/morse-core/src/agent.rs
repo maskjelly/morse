@@ -7,18 +7,54 @@ use crate::session::Session;
 use crate::tools::{exec_tool, ToolCtx};
 
 const MAX_TURNS: usize = 48;
+const AGENTS_MD_CAP: usize = 8 * 1024;
 
 pub fn system_prompt(workspace: &str) -> String {
-    format!(
-        "You are Morse, an agent operating inside a cloud computer session. Workspace directory: {workspace}.\n\
+    let mut prompt = format!(
+        "You are Morse, an agent operating inside a computer session. Workspace directory: {workspace}.\n\
          Get the user's request done using tools. Run shell commands with bash, read and write files.\n\
          Keep a visible checklist: call the plan tool whenever tasks or their statuses change.\n\
          Keep prose terse. When the request is complete, finish with a short summary."
-    )
+    );
+    if let Some(extra) = project_instructions(std::path::Path::new(workspace)) {
+        prompt.push_str("\n\nProject instructions from AGENTS.md (follow them):\n");
+        prompt.push_str(&extra);
+    }
+    prompt
 }
 
-pub async fn runner(session: Arc<Session>, mut rx: tokio::sync::mpsc::UnboundedReceiver<String>) {
+/// Read AGENTS.md from the workspace, if present. Capped so a huge file
+/// cannot crowd out the session context.
+pub fn project_instructions(workspace: &std::path::Path) -> Option<String> {
+    for name in ["AGENTS.md", ".morse/AGENTS.md"] {
+        let path = workspace.join(name);
+        if let Ok(content) = std::fs::read_to_string(&path) {
+            let trimmed = content.trim();
+            if !trimmed.is_empty() {
+                return Some(crate::diff::cap(trimmed, AGENTS_MD_CAP));
+            }
+        }
+    }
+    None
+}
+
+fn max_turns() -> usize {
+    std::env::var("MORSE_MAX_TURNS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(MAX_TURNS)
+}
+
+pub async fn runner(
+    session: std::sync::Weak<Session>,
+    mut rx: tokio::sync::mpsc::UnboundedReceiver<String>,
+) {
     while let Some(text) = rx.recv().await {
+        // Weak so the session can be dropped (eviction, shutdown) while idle.
+        let Some(session) = session.upgrade() else {
+            break;
+        };
         run_instruction(&session, text).await;
     }
 }
@@ -35,9 +71,11 @@ pub async fn run_instruction(session: &Arc<Session>, text: String) {
 
     let mut interrupted = false;
     let workspace = session.workspace.display().to_string();
+    let system = system_prompt(&workspace);
+    let turns_limit = max_turns();
     let mut turn = 0usize;
 
-    'outer: while turn < MAX_TURNS {
+    'outer: while turn < turns_limit {
         turn += 1;
         if token.is_cancelled() {
             interrupted = true;
@@ -46,15 +84,18 @@ pub async fn run_instruction(session: &Arc<Session>, text: String) {
         let req = ChatRequest {
             purpose: Purpose::Main,
             session_id: session.id.clone(),
-            system: system_prompt(&workspace),
+            system: system.clone(),
             messages: session.history_snapshot(),
             tools: tool_specs(),
             max_tokens: 4096,
         };
+        let mut on_delta = |delta: String| {
+            session.emit(ServerMsg::AgentDelta { text: delta });
+        };
         let response = tokio::select! {
             biased;
             _ = token.cancelled() => { interrupted = true; break; }
-            response = session.provider.complete(&req) => response,
+            response = session.provider.complete_stream(&req, &mut on_delta) => response,
         };
         let resp: ChatResponse = match response {
             Ok(r) => r,
@@ -66,19 +107,11 @@ pub async fn run_instruction(session: &Arc<Session>, text: String) {
             }
         };
 
-        let text_blocks: Vec<&Block> = resp
-            .blocks
-            .iter()
-            .filter(|b| matches!(b, Block::Text { .. }))
-            .collect();
-        for b in &text_blocks {
-            if let Block::Text { text } = b {
-                if !text.trim().is_empty() {
-                    session.emit(ServerMsg::AgentText {
-                        text: text.trim().to_string(),
-                    });
-                }
-            }
+        if !resp.usage.is_zero() {
+            session.emit(ServerMsg::Usage {
+                input_tokens: resp.usage.input_tokens,
+                output_tokens: resp.usage.output_tokens,
+            });
         }
 
         let tool_uses: Vec<Block> = resp
@@ -205,9 +238,9 @@ pub async fn run_instruction(session: &Arc<Session>, text: String) {
         session.push_history(ChatMessage::user_results(results));
     }
 
-    if turn >= MAX_TURNS {
+    if turn >= turns_limit {
         session.emit(ServerMsg::Error {
-            message: format!("instruction hit the {MAX_TURNS}-turn limit"),
+            message: format!("instruction hit the {turns_limit}-turn limit"),
         });
     }
     if interrupted {

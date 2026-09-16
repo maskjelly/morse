@@ -4,8 +4,10 @@ pub mod llm;
 pub mod protocol;
 pub mod provider_anthropic;
 pub mod provider_mock;
+pub mod provider_openai;
 pub mod session;
 pub mod side;
+pub mod sse;
 pub mod state;
 pub mod tools;
 
@@ -13,4 +15,4 @@ pub use llm::provider_from_env;
 pub use protocol::{
     new_session_id, ClientMsg, Envelope, ServerMsg, StatusKind, StreamKind, TaskStatus, TaskView,
 };
-pub use session::Session;
+pub use session::{load_session_files, Session};

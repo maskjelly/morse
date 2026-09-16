@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/morse-core", "crates/morse-server", "crates/morse-cli"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 license = "MIT"
 
@@ -15,17 +15,20 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"
 async-trait = "0.1"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 tokio-tungstenite = "0.24"
 futures-util = "0.3"
 ratatui = "0.29"
 crossterm = "0.28"
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 uuid = { version = "1", features = ["v4"] }
 similar = "2"
 chrono = "0.4"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+regex = "1"
+globset = "0.4"
+criterion = { version = "0.5", features = ["async_tokio"] }
 
 [profile.release]
 lto = true

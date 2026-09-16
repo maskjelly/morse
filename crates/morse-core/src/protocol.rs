@@ -63,6 +63,16 @@ pub enum ServerMsg {
     AgentText {
         text: String,
     },
+    /// Streaming fragment of model prose. Clients append to the current
+    /// agent message; `AgentText` is used for non-model notices instead.
+    AgentDelta {
+        text: String,
+    },
+    /// Token usage reported by the provider for one model response.
+    Usage {
+        input_tokens: u64,
+        output_tokens: u64,
+    },
     ToolCall {
         id: String,
         tool: String,

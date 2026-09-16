@@ -11,6 +11,7 @@ pub struct ClientConfig {
     pub url: String,
     pub session: Option<String>,
     pub workspace: Option<String>,
+    pub token: Option<String>,
 }
 
 pub struct ClientHandle {
@@ -66,8 +67,39 @@ async fn stream_once(
     cmd_rx: &mut mpsc::UnboundedReceiver<ClientMsg>,
     last_seq: &mut u64,
 ) -> Flow {
-    let (ws, _) = match tokio_tungstenite::connect_async(&cfg.url).await {
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    let mut request = match cfg.url.as_str().into_client_request() {
+        Ok(r) => r,
+        Err(e) => return Flow::Retry(format!("bad url: {e}")),
+    };
+    if let Some(token) = &cfg.token {
+        match format!("Bearer {token}").parse() {
+            Ok(value) => {
+                request.headers_mut().insert("authorization", value);
+            }
+            Err(_) => return Flow::Retry("invalid token".into()),
+        }
+    }
+    let (ws, _) = match tokio_tungstenite::connect_async(request).await {
         Ok(v) => v,
+        // A rejected handshake (e.g. bad token) will never succeed on retry.
+        Err(tokio_tungstenite::tungstenite::Error::Http(resp)) => {
+            let status = resp.status();
+            let _ = evt_tx
+                .send(Envelope {
+                    seq: 0,
+                    ts: now_ms(),
+                    inner: ServerMsg::Error {
+                        message: if status == 401 {
+                            "unauthorized: server requires MORSE_TOKEN".to_string()
+                        } else {
+                            format!("server rejected the connection: {status}")
+                        },
+                    },
+                })
+                .await;
+            return Flow::Done;
+        }
         Err(e) => return Flow::Retry(format!("connect failed: {e}")),
     };
     let (mut sink, mut stream) = ws.split();
@@ -148,16 +180,30 @@ async fn stream_once(
     }
 }
 
-pub async fn list_sessions(origin: &str) -> anyhow::Result<serde_json::Value> {
-    let http = origin
+pub async fn list_sessions(origin: &str, token: Option<&str>) -> anyhow::Result<serde_json::Value> {
+    let http = http_origin(origin);
+    let url = format!("{http}/api/sessions");
+    let mut request = reqwest::Client::new().get(&url);
+    if let Some(token) = token {
+        request = request.bearer_auth(token);
+    }
+    let resp = request.send().await?;
+    anyhow::ensure!(
+        resp.status().is_success(),
+        "server returned {}",
+        resp.status()
+    );
+    let body: serde_json::Value = resp.json().await?;
+    Ok(body)
+}
+
+pub fn http_origin(origin: &str) -> String {
+    origin
         .replace("ws://", "http://")
         .replace("wss://", "https://")
         .trim_end_matches("/ws")
-        .to_string();
-    let url = format!("{http}/api/sessions");
-    let resp = reqwest::get(&url).await?;
-    let body: serde_json::Value = resp.json().await?;
-    Ok(body)
+        .trim_end_matches('/')
+        .to_string()
 }
 
 pub fn provider_banner(env: &ServerMsg) -> String {
@@ -177,5 +223,44 @@ pub fn provider_banner(env: &ServerMsg) -> String {
             format!("session {session_id} • {llm} • workspace {workspace} • demo={demo}")
         }
         _ => String::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn rejected_handshake_reports_once_and_stops_retrying() {
+        let root = std::env::temp_dir().join(format!("morse-client-{}", now_ms()));
+        let app = morse_server::App::with_options(
+            Arc::new(morse_core::provider_mock::Mock::new()),
+            root.clone(),
+            Some("right-token".into()),
+            8,
+        );
+        let (addr, server) = morse_server::serve("127.0.0.1:0".parse().unwrap(), app)
+            .await
+            .unwrap();
+        let mut handle = spawn(ClientConfig {
+            url: format!("ws://{addr}/ws"),
+            session: None,
+            workspace: None,
+            token: Some("wrong-token".into()),
+        });
+        let env = tokio::time::timeout(std::time::Duration::from_secs(5), handle.events.recv())
+            .await
+            .expect("event timeout")
+            .expect("channel closed too early");
+        assert!(
+            matches!(&env.inner, ServerMsg::Error { message } if message.contains("unauthorized"))
+        );
+        // Channel closes instead of retrying forever.
+        let end =
+            tokio::time::timeout(std::time::Duration::from_secs(5), handle.events.recv()).await;
+        assert!(matches!(end, Ok(None)));
+        server.abort();
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
