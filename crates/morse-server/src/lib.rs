@@ -141,13 +141,12 @@ impl App {
         }
     }
 
-    async fn create_session(&self, workspace: Option<String>) -> anyhow::Result<Arc<Session>> {
+    async fn create_session(&self, workspace: Option<String>) -> Result<Arc<Session>, StatusCode> {
         let mut sessions = self.sessions.lock().await;
         self.evict_if_needed(&mut sessions);
-        anyhow::ensure!(
-            sessions.len() < self.max_sessions,
-            "all sessions are busy; retry later"
-        );
+        if sessions.len() >= self.max_sessions {
+            return Err(StatusCode::TOO_MANY_REQUESTS);
+        }
         let id = new_session_id();
         let ws = match workspace {
             Some(w) if !w.trim().is_empty() => {
@@ -161,11 +160,18 @@ impl App {
             _ => self.sessions_root().join(&id).join("ws"),
         };
         let dir = self.sessions_root().join(&id);
+        let persistence_error = |error| {
+            tracing::error!("cannot create persistent session: {error}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        };
+        std::fs::create_dir_all(&ws).map_err(persistence_error)?;
+        std::fs::create_dir_all(&dir).map_err(persistence_error)?;
         let session = Session::new(id.clone(), ws.clone(), self.provider.clone());
-        let _ = std::fs::create_dir_all(&dir);
-        let _ = session.enable_persistence(&dir);
+        session
+            .enable_persistence(&dir)
+            .map_err(persistence_error)?;
         let created_ts = session.state_snapshot().created_ts;
-        let _ = std::fs::write(
+        std::fs::write(
             dir.join("meta.json"),
             serde_json::to_vec(&json!({
                 "id": id,
@@ -173,7 +179,8 @@ impl App {
                 "created_ts": created_ts,
             }))
             .unwrap_or_default(),
-        );
+        )
+        .map_err(persistence_error)?;
         sessions.insert(id, session.clone());
         Ok(session)
     }
@@ -322,8 +329,10 @@ async fn create_session(State(app): State<Arc<App>>, body: axum::body::Bytes) ->
         Ok(session) => session,
         Err(error) => {
             return (
-                StatusCode::TOO_MANY_REQUESTS,
-                Json(json!({"error": error.to_string()})),
+                error,
+                Json(json!({"error": if error == StatusCode::TOO_MANY_REQUESTS {
+                    "all sessions are busy; retry later"
+                } else { "session persistence unavailable; check server logs" }})),
             )
                 .into_response()
         }

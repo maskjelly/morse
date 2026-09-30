@@ -414,3 +414,28 @@ async fn busy_sessions_and_instruction_queue_are_bounded() {
     post_json(&format!("{base}/api/sessions/{id}/interrupt"), json!({})).await;
     server.abort();
 }
+
+#[tokio::test]
+async fn storage_failure_does_not_create_a_volatile_session() {
+    let root = temp_root("bad-storage");
+    let blocked = root.join("file");
+    std::fs::write(&blocked, "not a directory").unwrap();
+    let app = morse_server::App::with_options(
+        Arc::new(morse_core::provider_mock::Mock::new()),
+        blocked,
+        None,
+        64,
+    );
+    let (base, server) = start(app).await;
+    let (status, _) = post_json(&format!("{base}/api/sessions"), json!({})).await;
+    assert_eq!(status, reqwest::StatusCode::INTERNAL_SERVER_ERROR);
+    let sessions: Value = reqwest::get(format!("{base}/api/sessions"))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(sessions, json!([]));
+    server.abort();
+    std::fs::remove_dir_all(root).unwrap();
+}
