@@ -69,12 +69,17 @@ MORSE_URL=ws://server:7800/ws morse run "run cargo test" # human-readable
 MORSE_URL=ws://server:7800/ws morse run --json "run cargo test" | jq .
 ```
 
+## Deploy on a VPS or microVM
+
+Use the [deployment guide](docs/deployment.md) for Docker Compose, a systemd installer, SSH access, upgrades, and adapters for existing agent CLIs.
+
 ## Providers
 
 Morse speaks two model APIs and works with anything compatible. Pick one with env vars on the **server**:
 
 | Provider | Setup |
 |---|---|
+| Existing noninteractive agent CLI | `MORSE_PROVIDER=command` + `MORSE_AGENT_PROGRAM` + JSON `MORSE_AGENT_ARGS` ([guide](docs/deployment.md#use-an-existing-agent)) |
 | Demo (default, no key) | nothing — real commands, scripted tool selection |
 | Anthropic | `MORSE_PROVIDER=anthropic MORSE_API_KEY=sk-ant-…` |
 | OpenAI | `MORSE_PROVIDER=openai MORSE_API_KEY=sk-…` |

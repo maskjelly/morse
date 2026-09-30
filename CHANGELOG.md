@@ -1,5 +1,14 @@
 # Changelog
 
+- Handle service SIGTERM by cancelling active commands before exit; add an offline real-binary deployment smoke test and private Compose environment generator.
+
+## Unreleased
+
+- Add command-provider adapters for existing agent CLIs, with literal prompt arguments and streamed process output.
+- Add persistent Docker Compose deployment and a dedicated-user systemd installer for VPS and microVM guests.
+- Restore saved sessions when using `morse serve`; reject unauthenticated public binds and invalid explicit providers.
+- Write history atomically after each conversation update; mark interrupted restart outcomes explicitly and bound instruction/side queues to 64 entries.
+
 All notable changes to Morse. Version 0.2.0 is the first release intended as a complete, self-hosted product.
 
 ## 0.2.0 — 2026-09-16

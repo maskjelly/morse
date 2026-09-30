@@ -14,7 +14,7 @@ use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
 use tokio::net::TcpListener;
 
-use morse_core::protocol::{now_ms, ClientMsg, Envelope, ServerMsg, StatusKind};
+use morse_core::protocol::{now_ms, ClientMsg, Envelope, ServerMsg};
 use morse_core::{load_session_files, new_session_id, Session, TaskStatus};
 
 pub const DEFAULT_MAX_SESSIONS: usize = 64;
@@ -55,7 +55,7 @@ impl App {
             sessions: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             workspace_root: root,
             token,
-            max_sessions,
+            max_sessions: max_sessions.max(1),
         }
     }
 
@@ -73,8 +73,15 @@ impl App {
         let Ok(entries) = std::fs::read_dir(&root) else {
             return 0;
         };
+        let mut entries = entries.flatten().collect::<Vec<_>>();
+        entries.sort_by_key(|entry| {
+            std::cmp::Reverse(entry.metadata().and_then(|m| m.modified()).ok())
+        });
         let mut loaded = 0usize;
-        for entry in entries.flatten() {
+        for entry in entries {
+            if loaded >= self.max_sessions {
+                break;
+            }
             let dir = entry.path();
             if !dir.is_dir() {
                 continue;
@@ -112,7 +119,35 @@ impl App {
         loaded
     }
 
-    async fn create_session(&self, workspace: Option<String>) -> Arc<Session> {
+    /// Cancel active commands before exiting on a service stop.
+    pub async fn stop_sessions(&self) {
+        let sessions = self
+            .sessions
+            .lock()
+            .await
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        for session in &sessions {
+            if session.is_busy() {
+                session.interrupt();
+            }
+        }
+        for _ in 0..100 {
+            if sessions.iter().all(|s| !s.is_busy()) {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    }
+
+    async fn create_session(&self, workspace: Option<String>) -> anyhow::Result<Arc<Session>> {
+        let mut sessions = self.sessions.lock().await;
+        self.evict_if_needed(&mut sessions);
+        anyhow::ensure!(
+            sessions.len() < self.max_sessions,
+            "all sessions are busy; retry later"
+        );
         let id = new_session_id();
         let ws = match workspace {
             Some(w) if !w.trim().is_empty() => {
@@ -139,10 +174,8 @@ impl App {
             }))
             .unwrap_or_default(),
         );
-        let mut sessions = self.sessions.lock().await;
-        self.evict_if_needed(&mut sessions);
         sessions.insert(id, session.clone());
-        session
+        Ok(session)
     }
 
     /// Drop the oldest idle session from memory when at capacity.
@@ -151,7 +184,7 @@ impl App {
         while sessions.len() >= self.max_sessions {
             let victim = sessions
                 .values()
-                .filter(|s| s.state_snapshot().status == StatusKind::Idle)
+                .filter(|s| !s.is_busy())
                 .min_by_key(|s| s.state_snapshot().created_ts)
                 .map(|s| s.id.clone());
             match victim {
@@ -207,6 +240,11 @@ pub async fn serve(
     bind: SocketAddr,
     app: App,
 ) -> anyhow::Result<(SocketAddr, tokio::task::JoinHandle<anyhow::Result<()>>)> {
+    if !bind.ip().is_loopback() && !app.auth_enabled() {
+        anyhow::bail!(
+            "non-loopback bind requires MORSE_TOKEN; use an SSH tunnel for private access"
+        );
+    }
     let listener = TcpListener::bind(bind).await?;
     let addr = listener.local_addr()?;
     let state = Arc::new(app);
@@ -280,6 +318,16 @@ async fn create_session(State(app): State<Arc<App>>, body: axum::body::Bytes) ->
     let session = app
         .create_session(body["workspace"].as_str().map(|s| s.to_string()))
         .await;
+    let session = match session {
+        Ok(session) => session,
+        Err(error) => {
+            return (
+                StatusCode::TOO_MANY_REQUESTS,
+                Json(json!({"error": error.to_string()})),
+            )
+                .into_response()
+        }
+    };
     let st = session.state_snapshot();
     Json(json!({
         "id": session.id,
@@ -312,7 +360,13 @@ async fn post_instruction(
         )
             .into_response();
     };
-    session.submit_instruction(text);
+    if !session.submit_instruction(text) {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(json!({"error": "instruction queue full"})),
+        )
+            .into_response();
+    }
     (StatusCode::ACCEPTED, Json(json!({"accepted": true}))).into_response()
 }
 
@@ -390,7 +444,17 @@ async fn handle_socket(app: Arc<App>, mut socket: WebSocket) {
         }
     };
     let session = match command {
-        Ok(ClientMsg::Create { workspace }) => app.create_session(workspace).await,
+        Ok(ClientMsg::Create { workspace }) => match app.create_session(workspace).await {
+            Ok(session) => session,
+            Err(error) => {
+                let _ = socket
+                    .send(wire(ServerMsg::Error {
+                        message: error.to_string(),
+                    }))
+                    .await;
+                return;
+            }
+        },
         Ok(ClientMsg::Attach { session_id }) => match app.get_session(&session_id).await {
             Some(session) => session,
             None => {
@@ -459,7 +523,7 @@ async fn handle_socket(app: Arc<App>, mut socket: WebSocket) {
                     _ => continue,
                 };
                 let response = match serde_json::from_str::<ClientMsg>(&text) {
-                    Ok(ClientMsg::Instruction { text }) => { session.submit_instruction(text); None }
+                    Ok(ClientMsg::Instruction { text }) => { let _ = session.submit_instruction(text); None }
                     Ok(ClientMsg::SideQuery { text }) => { session.ask_side(text); None }
                     Ok(ClientMsg::Interrupt) => { session.interrupt(); None }
                     Ok(ClientMsg::Ping) => Some(ServerMsg::Pong),
@@ -471,5 +535,23 @@ async fn handle_socket(app: Arc<App>, mut socket: WebSocket) {
                 }
             }
         }
+    }
+}
+
+/// Handle both interactive Ctrl-C and Linux service/container SIGTERM.
+pub async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        let mut terminate =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                .expect("install SIGTERM handler");
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {},
+            _ = terminate.recv() => {},
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
     }
 }

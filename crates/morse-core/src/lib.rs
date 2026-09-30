@@ -3,6 +3,7 @@ pub mod diff;
 pub mod llm;
 pub mod protocol;
 pub mod provider_anthropic;
+pub mod provider_command;
 pub mod provider_mock;
 pub mod provider_openai;
 pub mod session;

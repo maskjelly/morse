@@ -364,3 +364,53 @@ async fn websocket_hello_reports_provider() {
     server.abort();
     let _ = std::fs::remove_dir_all(&root);
 }
+
+#[tokio::test]
+async fn public_bind_without_auth_is_rejected() {
+    let app = morse_server::App::with_options(
+        Arc::new(morse_core::provider_mock::Mock::new()),
+        temp_root("public"),
+        None,
+        1,
+    );
+    assert!(morse_server::serve("0.0.0.0:0".parse().unwrap(), app)
+        .await
+        .is_err());
+}
+
+#[tokio::test]
+async fn busy_sessions_and_instruction_queue_are_bounded() {
+    let app = morse_server::App::with_options(
+        Arc::new(morse_core::provider_mock::Mock::new()),
+        temp_root("bounded"),
+        None,
+        1,
+    );
+    let (base, server) = start(app.clone()).await;
+    let (_, created) = post_json(&format!("{base}/api/sessions"), json!({})).await;
+    let id = created["id"].as_str().unwrap();
+    post_json(
+        &format!("{base}/api/sessions/{id}/instruction"),
+        json!({"text": "run sleep 10"}),
+    )
+    .await;
+    wait_for_status(&reqwest::Client::new(), &base, id, StatusKind::Working).await;
+    let (status, _) = post_json(&format!("{base}/api/sessions"), json!({})).await;
+    assert_eq!(status, 429);
+    for _ in 0..64 {
+        let (status, _) = post_json(
+            &format!("{base}/api/sessions/{id}/instruction"),
+            json!({"text": "run true"}),
+        )
+        .await;
+        assert_eq!(status, 202);
+    }
+    let (status, _) = post_json(
+        &format!("{base}/api/sessions/{id}/instruction"),
+        json!({"text": "run true"}),
+    )
+    .await;
+    assert_eq!(status, 429);
+    post_json(&format!("{base}/api/sessions/{id}/interrupt"), json!({})).await;
+    server.abort();
+}

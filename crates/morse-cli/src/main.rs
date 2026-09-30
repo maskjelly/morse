@@ -127,22 +127,17 @@ async fn serve(bind: &str) -> anyhow::Result<()> {
         )
         .init();
     let addr: std::net::SocketAddr = bind.parse()?;
-    if !addr.ip().is_loopback()
-        && std::env::var("MORSE_TOKEN")
-            .map(|t| t.is_empty())
-            .unwrap_or(true)
-    {
-        println!("warning: binding {addr} without MORSE_TOKEN — anyone who can reach this port can run commands");
-    }
-    let provider = morse_core::provider_from_env();
+    let provider = morse_core::provider_from_env()?;
     let demo = provider.is_mock();
     let app = ServerApp::new(provider);
-    let (bound, handle) = morse_server::serve(addr, app).await?;
+    let restored = app.load_sessions().await;
+    println!("restored {restored} session(s)");
+    let (bound, handle) = morse_server::serve(addr, app.clone()).await?;
     println!("morse server listening on ws://{bound}/ws");
     if demo {
         println!("demo mode: no LLM key set (export MORSE_API_KEY or ANTHROPIC_API_KEY for a real agent)");
     }
-    let ctrl_c = tokio::signal::ctrl_c();
+    let ctrl_c = morse_server::shutdown_signal();
     tokio::select! {
         _ = ctrl_c => {}
         r = handle => {
@@ -151,6 +146,7 @@ async fn serve(bind: &str) -> anyhow::Result<()> {
             }
         }
     }
+    app.stop_sessions().await;
     Ok(())
 }
 

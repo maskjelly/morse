@@ -137,6 +137,9 @@ pub trait Provider: Send + Sync {
     fn is_mock(&self) -> bool {
         false
     }
+    fn local_side(&self) -> bool {
+        self.is_mock()
+    }
     async fn complete(&self, req: &ChatRequest) -> anyhow::Result<ChatResponse>;
 
     /// Complete a request while streaming text deltas to `on_text`.
@@ -301,40 +304,44 @@ pub fn tool_specs() -> Vec<ToolSpec> {
     ]
 }
 
-pub fn provider_from_env() -> std::sync::Arc<dyn Provider> {
+pub fn provider_from_env() -> anyhow::Result<std::sync::Arc<dyn Provider>> {
     use std::sync::Arc;
     let explicit = std::env::var("MORSE_PROVIDER")
         .ok()
         .map(|s| s.to_lowercase());
     if let Some(name) = explicit.as_deref() {
-        match name {
-            "mock" | "demo" => return Arc::new(crate::provider_mock::Mock::new()),
-            "openai" => {
-                if let Some(p) = crate::provider_openai::OpenAi::from_env() {
-                    return Arc::new(p);
-                }
-            }
-            "anthropic" => {
-                if let Some(p) = crate::provider_anthropic::Anthropic::from_env() {
-                    return Arc::new(p);
-                }
-            }
-            other => tracing::warn!("unknown MORSE_PROVIDER '{other}', auto-detecting"),
+        return match name {
+            "mock" | "demo" => Ok(Arc::new(crate::provider_mock::Mock::new())),
+            "command" => Ok(Arc::new(crate::provider_command::CommandAgent::from_env()?)),
+            "openai" => crate::provider_openai::OpenAi::from_env()
+                .map(|p| Arc::new(p) as Arc<dyn Provider>)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "openai requires MORSE_API_KEY, OPENAI_API_KEY or MORSE_BASE_URL"
+                    )
+                }),
+            "anthropic" => crate::provider_anthropic::Anthropic::from_env()
+                .map(|p| Arc::new(p) as Arc<dyn Provider>)
+                .ok_or_else(|| {
+                    anyhow::anyhow!("anthropic requires MORSE_API_KEY or ANTHROPIC_API_KEY")
+                }),
+            other => anyhow::bail!(
+                "unknown MORSE_PROVIDER '{other}'; use demo, openai, anthropic or command"
+            ),
+        };
+    }
+    if std::env::var("MORSE_BASE_URL").is_ok() || std::env::var("OPENAI_API_KEY").is_ok() {
+        if let Some(p) = crate::provider_openai::OpenAi::from_env() {
+            return Ok(Arc::new(p));
         }
-    } else {
-        if std::env::var("MORSE_BASE_URL").is_ok() || std::env::var("OPENAI_API_KEY").is_ok() {
-            if let Some(p) = crate::provider_openai::OpenAi::from_env() {
-                return Arc::new(p);
-            }
-        }
-        if std::env::var("ANTHROPIC_API_KEY").is_ok() || std::env::var("MORSE_API_KEY").is_ok() {
-            if let Some(p) = crate::provider_anthropic::Anthropic::from_env() {
-                return Arc::new(p);
-            }
+    }
+    if std::env::var("ANTHROPIC_API_KEY").is_ok() || std::env::var("MORSE_API_KEY").is_ok() {
+        if let Some(p) = crate::provider_anthropic::Anthropic::from_env() {
+            return Ok(Arc::new(p));
         }
     }
     tracing::warn!("no LLM configured: running in demo mode with the mock provider");
-    Arc::new(crate::provider_mock::Mock::new())
+    Ok(Arc::new(crate::provider_mock::Mock::new()))
 }
 
 #[cfg(test)]

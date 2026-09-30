@@ -28,8 +28,8 @@ pub struct Session {
     seq: AtomicU64,
     pub state: Mutex<SessionState>,
     history: Mutex<Vec<ChatMessage>>,
-    instr_tx: mpsc::UnboundedSender<String>,
-    side_tx: mpsc::UnboundedSender<String>,
+    instr_tx: mpsc::Sender<String>,
+    side_tx: mpsc::Sender<String>,
     current_cancel: Mutex<Option<CancellationToken>>,
     session_dir: Mutex<Option<PathBuf>>,
     event_file: Mutex<Option<std::fs::File>>,
@@ -48,7 +48,38 @@ impl Session {
         events: Vec<Envelope>,
         history: Vec<ChatMessage>,
     ) -> Arc<Session> {
-        Self::build(id, workspace, provider, events, history)
+        let session = Self::build(id, workspace, provider, events, history);
+        if session.state_snapshot().status == crate::protocol::StatusKind::Working {
+            let unresolved = session.history_snapshot().last().map(|msg| {
+                msg.blocks.iter().filter_map(|block| match block {
+                    crate::llm::Block::ToolUse { id, .. } => Some(crate::llm::Block::ToolResult {
+                        tool_use_id: id.clone(),
+                        content: "Server restarted; execution outcome is unknown. Inspect the workspace before retrying.".into(),
+                        is_error: true,
+                    }),
+                    _ => None,
+                }).collect::<Vec<_>>()
+            }).unwrap_or_default();
+            if !unresolved.is_empty() {
+                session.push_history(ChatMessage::user_results(unresolved));
+            }
+            if let Some(tool) = session.state_snapshot().current_tool {
+                session.emit(ServerMsg::ToolResult {
+                    call_id: tool.call_id,
+                    tool: tool.tool,
+                    ok: false,
+                    exit_code: None,
+                    duration_ms: 0,
+                    truncated: false,
+                    summary: "server restarted; outcome unknown".into(),
+                });
+            }
+            session.emit(ServerMsg::Status {
+                status: crate::protocol::StatusKind::Interrupted,
+                detail: Some("server restarted; inspect the workspace before resubmitting".into()),
+            });
+        }
+        session
     }
 
     fn build(
@@ -60,8 +91,8 @@ impl Session {
     ) -> Arc<Session> {
         std::fs::create_dir_all(&workspace).ok();
         let (tx, _) = broadcast::channel(2048);
-        let (instr_tx, instr_rx) = mpsc::unbounded_channel();
-        let (side_tx, side_rx) = mpsc::unbounded_channel();
+        let (instr_tx, instr_rx) = mpsc::channel(64);
+        let (side_tx, side_rx) = mpsc::channel(64);
         let session = Arc::new(Session {
             id,
             workspace,
@@ -114,6 +145,7 @@ impl Session {
         if existing > 0 {
             self.rewrite_events(dir);
         }
+        self.persist_history();
         Ok(())
     }
 
@@ -197,7 +229,12 @@ impl Session {
         };
         let history = self.history.lock().unwrap().clone();
         if let Ok(json) = serde_json::to_vec(&history) {
-            let _ = std::fs::write(dir.join(HISTORY_FILE), json);
+            let tmp = dir.join("history.json.tmp");
+            if std::fs::write(&tmp, json).is_ok() {
+                if let Err(error) = std::fs::rename(&tmp, dir.join(HISTORY_FILE)) {
+                    tracing::error!("persisting history: {error}");
+                }
+            }
         }
     }
 
@@ -240,6 +277,7 @@ impl Session {
 
     pub fn push_history(&self, msg: ChatMessage) {
         self.history.lock().unwrap().push(msg);
+        self.persist_history();
     }
 
     pub fn history_snapshot(&self) -> Vec<ChatMessage> {
@@ -266,12 +304,28 @@ impl Session {
         self.persist_history();
     }
 
-    pub fn submit_instruction(&self, text: String) {
-        let _ = self.instr_tx.send(text);
+    pub fn is_busy(&self) -> bool {
+        self.state_snapshot().status == crate::protocol::StatusKind::Working
+            || self.instr_tx.capacity() < 64
+            || self.current_cancel.lock().unwrap().is_some()
+    }
+
+    pub fn submit_instruction(&self, text: String) -> bool {
+        if self.instr_tx.try_send(text).is_err() {
+            self.emit(ServerMsg::Error {
+                message: "instruction queue is full or closed; retry later".into(),
+            });
+            return false;
+        }
+        true
     }
 
     pub fn ask_side(&self, question: String) {
-        let _ = self.side_tx.send(question);
+        if self.side_tx.try_send(question).is_err() {
+            self.emit(ServerMsg::Error {
+                message: "side question queue is full or closed; retry later".into(),
+            });
+        }
     }
 
     pub fn interrupt(&self) {
@@ -366,8 +420,9 @@ mod tests {
         let state = restored.state_snapshot();
         assert_eq!(state.tasks.len(), 1);
         assert_eq!(state.agent_text, "done");
-        assert_eq!(restored.log_tail(10).len(), 3);
-        assert_eq!(restored.seq_now(), 3);
+        assert_eq!(restored.log_tail(10).len(), 4);
+        assert_eq!(restored.seq_now(), 4);
+        assert_eq!(state.status, crate::protocol::StatusKind::Interrupted);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

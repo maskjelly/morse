@@ -48,7 +48,7 @@ fn max_turns() -> usize {
 
 pub async fn runner(
     session: std::sync::Weak<Session>,
-    mut rx: tokio::sync::mpsc::UnboundedReceiver<String>,
+    mut rx: tokio::sync::mpsc::Receiver<String>,
 ) {
     while let Some(text) = rx.recv().await {
         // Weak so the session can be dropped (eviction, shutdown) while idle.

@@ -457,13 +457,21 @@ async fn bash(input: &Value, ctx: &mut ToolCtx<'_>) -> Result<ToolOutcome> {
     let mut command = Command::new("bash");
     #[cfg(unix)]
     command.process_group(0);
+    if !input
+        .get("inherit_agent_env")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        for key in ["MORSE_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY"] {
+            command.env_remove(key);
+        }
+    }
     let mut child = command
         .arg("-c")
         .arg(cmd)
         .current_dir(ctx.workspace)
         .env("MORSE_SESSION", "1")
-        .env_remove("MORSE_API_KEY")
-        .env_remove("ANTHROPIC_API_KEY")
+        .env_remove("MORSE_TOKEN")
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .stdin(std::process::Stdio::null())

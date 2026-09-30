@@ -81,3 +81,7 @@ Then restart the server and confirm `morse sessions` still lists the session and
 - **Provider errors:** the client shows the provider message; check key, model name, base URL, and balance. Transient 429/5xx errors are retried automatically.
 - **Command timeout:** bash defaults to 120 s; ask for `timeout_ms` or split the command.
 - **Session listed but feels slow after restart:** the replay is capped at the newest 4,000 events; older activity is on disk in `events.jsonl`.
+
+## Restart and admission behavior
+
+Both server entry points reload saved sessions. Runs active at shutdown restore as interrupted, with an unknown execution outcome; inspect files and external effects before retrying. Instructions and side questions have separate 64-entry memory queues; REST returns 429 when the instruction queue is full. The server does not automatically replay queued work after a restart. History files are replaced atomically after conversation updates.

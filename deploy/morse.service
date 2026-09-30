@@ -1,0 +1,27 @@
+[Unit]
+Description=Morse agent server
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=morse
+Group=morse
+WorkingDirectory=/home/morse
+Environment=MORSE_HOME=/home/morse/.morse
+EnvironmentFile=/etc/morse.env
+ExecStart=/usr/local/bin/morse serve --bind 127.0.0.1:7800
+Restart=on-failure
+RestartSec=3
+KillMode=control-group
+TimeoutStopSec=30
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+LimitNOFILE=8192
+TasksMax=256
+MemoryMax=2G
+
+[Install]
+WantedBy=multi-user.target

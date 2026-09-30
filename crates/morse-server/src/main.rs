@@ -14,11 +14,11 @@ async fn main() -> anyhow::Result<()> {
 
     let bind = std::env::var("MORSE_BIND").unwrap_or_else(|_| "127.0.0.1:7800".to_string());
     let bind = SocketAddr::from_str(&bind)?;
-    let provider = provider_from_env();
+    let provider = provider_from_env()?;
     let demo = provider.is_mock();
     let app = morse_server::App::new(provider);
     let restored = app.load_sessions().await;
-    let (addr, handle) = serve(bind, app).await?;
+    let (addr, handle) = serve(bind, app.clone()).await?;
     tracing::info!(
         "morse server listening on ws://{addr}/ws ({} mode, {restored} restored session(s))",
         if demo { "demo" } else { "live" }
@@ -27,7 +27,7 @@ async fn main() -> anyhow::Result<()> {
     if demo {
         println!("demo mode: no LLM key set (use MORSE_API_KEY or ANTHROPIC_API_KEY)");
     }
-    let ctrl_c = tokio::signal::ctrl_c();
+    let ctrl_c = morse_server::shutdown_signal();
     tokio::select! {
         _ = ctrl_c => {}
         r = handle => {
@@ -36,5 +36,6 @@ async fn main() -> anyhow::Result<()> {
             }
         }
     }
+    app.stop_sessions().await;
     Ok(())
 }

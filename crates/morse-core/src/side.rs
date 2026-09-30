@@ -10,7 +10,7 @@ One to six lines, no preamble.";
 
 pub async fn runner(
     session: std::sync::Weak<Session>,
-    mut rx: tokio::sync::mpsc::UnboundedReceiver<String>,
+    mut rx: tokio::sync::mpsc::Receiver<String>,
 ) {
     let mut history: Vec<ChatMessage> = Vec::new();
     while let Some(question) = rx.recv().await {
@@ -24,7 +24,7 @@ pub async fn runner(
 
 pub async fn answer(session: &Session, history: &mut Vec<ChatMessage>, question: &str) -> String {
     let state = session.state_snapshot();
-    if session.provider.is_mock() {
+    if session.provider.local_side() {
         return state.heuristic_answer();
     }
 
