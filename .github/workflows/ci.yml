@@ -22,3 +22,11 @@ jobs:
       - run: python3 deploy/smoke.py target/debug/morse
       - run: cargo doc --workspace --no-deps
       - run: cargo bench --workspace --no-run
+
+  container:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t morse:local .
+      - run: python3 deploy/container-smoke.py morse:local

@@ -80,3 +80,12 @@ morse run "run printf deployment-ok" ws://127.0.0.1:7800/ws
 Disconnect during a long command, reconnect with `--session`, and verify its output. Before an upgrade, wait for active commands to finish and stop the service. Back up all of `MORSE_HOME` and your project directories; restore them together with the matching configuration. Native upgrades: keep the previous binary, install the new one, restart and check health; restore the previous binary if startup fails. Compose upgrades: retain the previous image ID and volumes; rebuild and verify, or point Compose at the previous image. Never use `docker compose down -v` for an upgrade: it deletes state volumes.
 
 Sessions and replay survive a server restart; running processes do not resume. Inspect the workspace before resubmitting work whose outcome is uncertain. Queued instructions are memory-only. Keep the service private and use one owner per host/guest. Native commands have the account's permissions; containers share a kernel. For hostile workloads use separate disposable microVMs with restricted credentials and network policy.
+
+## Verify the container setup
+
+```sh
+docker build -t morse:local .
+python3 deploy/container-smoke.py morse:local
+```
+
+This offline smoke uses the actual Compose configuration with an isolated project, fresh volumes and a free loopback port. It verifies the nonroot account, external-agent argument quoting, authentication, and persistence after restart, then removes only its test containers and volumes. It preserves any existing `.env`. CI runs the same check on Linux.
